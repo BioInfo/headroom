@@ -1,0 +1,47 @@
+name: Request a provider
+description: Ask for a new AI coding subscription to be added to Headroom's gauge cluster.
+title: "[Provider] "
+labels: ["provider-request"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping Headroom cover more tools. Headroom shows **remaining
+        subscription headroom** — so it fits a tool that has a *paid plan with a usage
+        meter* (a window %, a monthly request/credit quota, or a credit balance). Tools
+        that are unlimited or bring-your-own-API-key have nothing to gauge.
+  - type: input
+    id: provider
+    attributes:
+      label: Provider
+      placeholder: "e.g. Cursor, GitHub Copilot, Windsurf, Amp, Zed"
+    validations:
+      required: true
+  - type: input
+    id: plan
+    attributes:
+      label: The paid plan you're on
+      placeholder: "e.g. Cursor Pro ($20/mo)"
+  - type: input
+    id: usage_page
+    attributes:
+      label: Where you see your usage today
+      description: The dashboard or page that shows your remaining quota.
+      placeholder: "e.g. https://cursor.com/dashboard → Usage"
+  - type: dropdown
+    id: meter
+    attributes:
+      label: What kind of meter is it?
+      options:
+        - "Rolling window (e.g. 5-hour / weekly %)"
+        - "Monthly request or credit quota"
+        - "Dollar / credit balance"
+        - "Not sure"
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything that helps us build it
+      description: A local CLI/creds file? How you log in? A usage API you know of? All optional.
+      placeholder: "e.g. there's a CLI at ~/.foo with a token; the dashboard calls /api/usage"

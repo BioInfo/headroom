@@ -1,0 +1,21 @@
+# Working-memory (local session state, never committed)
+.claude/CONTINUITY.md
+
+# Secrets / personal config
+local.env
+*.local.env
+secrets/
+
+# Swift / SwiftPM
+.build/
+.swiftpm/
+DerivedData/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+*.xcuserstate
+
+# macOS
+.DS_Store
+
+# built app bundle (artifact)
+Headroom.app/
