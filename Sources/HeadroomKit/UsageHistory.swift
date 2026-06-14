@@ -135,4 +135,77 @@ public final class UsageHistory {
         }
         return totals.map { TokenDay(day: $0.key, tokens: $0.value) }.sorted { $0.day < $1.day }
     }
+
+    // MARK: - layer 2 (cont.): Codex token backfill (from ~/.codex rollout JSONL)
+
+    /// Providers Headroom can backfill *real token* history for, from their local logs.
+    /// Claude (`~/.claude/projects/**.jsonl`) and Codex (`~/.codex/sessions/**.jsonl`) both
+    /// write per-turn token usage to disk; the key/web providers (MiniMax, GLM, Kimi) expose
+    /// no local token store, so they live in the self-recorded *utilization* layer only.
+    public static let tokenProviders = ["claude", "codex"]
+
+    /// Token series for any provider that has a local log, oldest→newest. Unknown providers
+    /// (no local token store) return empty.
+    public nonisolated static func tokenSeries(for provider: String, days: Int = 182) async -> [TokenDay] {
+        switch provider {
+        case "claude": await claudeTokenSeries(days: days)
+        case "codex":  await codexTokenSeries(days: days)
+        default:       []
+        }
+    }
+
+    /// Extract `(timestamp, tokens)` from one Codex rollout JSONL line, or nil if it isn't a
+    /// token-bearing event. Each `token_count` event carries `info.last_token_usage` — the
+    /// most recent turn's delta — so summing it per day gives daily throughput (the cumulative
+    /// `total_token_usage` would double-count). Pure + testable (no filesystem).
+    nonisolated static func parseCodexTokenLine(_ line: String, iso: ISO8601DateFormatter,
+                                                isoPlain: ISO8601DateFormatter) -> (Date, Int)? {
+        guard line.contains("last_token_usage"),
+              let data = line.data(using: .utf8),
+              let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              (o["type"] as? String) == "event_msg",
+              let ts = o["timestamp"] as? String,
+              let p = o["payload"] as? [String: Any],
+              (p["type"] as? String) == "token_count",
+              let info = p["info"] as? [String: Any],
+              let last = info["last_token_usage"] as? [String: Any],
+              let total = last["total_tokens"] as? Int, total > 0 else { return nil }
+        guard let when = iso.date(from: ts) ?? isoPlain.date(from: ts) else { return nil }
+        return (when, total)
+    }
+
+    /// Sum Codex token throughput per local day over the last `days`, from the rollout logs
+    /// under `~/.codex/sessions` (+ `archived_sessions`). Mirrors `claudeTokenSeries`: parse
+    /// only files modified within the window. Off-main: call from a Task.
+    public nonisolated static func codexTokenSeries(days: Int = 182) async -> [TokenDay] {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let roots = [home.appendingPathComponent(".codex/sessions", isDirectory: true),
+                     home.appendingPathComponent(".codex/archived_sessions", isDirectory: true)]
+        let fm = FileManager.default
+        let cal = Calendar.current
+        let windowStart = cal.startOfDay(for: Date()).addingTimeInterval(-Double(days) * 86400)
+        let fileCutoff = windowStart.addingTimeInterval(-86400)   // a session can straddle midnight
+        let iso = ISO8601DateFormatter(); iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let isoPlain = ISO8601DateFormatter()
+
+        var totals: [Date: Int] = [:]
+        for root in roots {
+            guard let en = fm.enumerator(at: root, includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey]) else { continue }
+            let urls = (en.allObjects as? [URL]) ?? []
+            for url in urls {
+                guard url.pathExtension == "jsonl", url.lastPathComponent.hasPrefix("rollout-") else { continue }
+                let vals = try? url.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey])
+                guard vals?.isRegularFile == true,
+                      let m = vals?.contentModificationDate, m >= fileCutoff else { continue }
+                do {
+                    for try await line in url.lines {
+                        guard let (when, tokens) = parseCodexTokenLine(line, iso: iso, isoPlain: isoPlain),
+                              when >= windowStart else { continue }
+                        totals[cal.startOfDay(for: when), default: 0] += tokens
+                    }
+                } catch { continue }
+            }
+        }
+        return totals.map { TokenDay(day: $0.key, tokens: $0.value) }.sorted { $0.day < $1.day }
+    }
 }

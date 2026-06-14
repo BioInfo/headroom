@@ -18,12 +18,15 @@ private let remainsJSON = #"""
 
     let five = usage.metrics.first { $0.label == "5h window" }
     let week = usage.metrics.first { $0.label == "weekly" }
-    // remaining 98 → used 2 ; remaining 100 → used 0
+    // remaining 98 → used 2 (limited 5h window)
     #expect(five?.percentUsed == 2)
-    #expect(week?.percentUsed == 0)
-    // end_time is epoch MS → reset Date
+    #expect(five?.unlimited == false)
+    // weekly status 3 = uncapped on the coding plan → Unlimited, not a 0% bar
+    #expect(week?.unlimited == true)
+    #expect(week?.percentUsed == nil)
+    #expect(week?.fractionUsed == nil)        // excluded from gauges/tightest
+    // end_time is epoch MS → reset Date (limited window only)
     #expect(five?.resetAt.map { Int($0.timeIntervalSince1970) } == 1781413200)
-    #expect(week?.resetAt.map { Int($0.timeIntervalSince1970) } == 1781481600)
     // 5h interval window length derived from start/end (18000s)
     #expect(five?.windowDuration == 18000)
 }

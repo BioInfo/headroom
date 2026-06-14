@@ -21,6 +21,7 @@ import Foundation
 public struct MiniMaxCollector: Collector {
     public let id = "minimax"
     public let displayName = "MiniMax"
+    public let cadence: RefreshCadence = .relaxed   // remote API call
 
     /// Keychain service for the user's pasted MiniMax key (Headroom-owned, never MiniMax's store).
     public static let keyService = "Headroom-minimax-key"
@@ -91,24 +92,34 @@ public struct MiniMaxCollector: Collector {
         let start_time: Double?                       // epoch ms
         let end_time: Double?                         // epoch ms — interval reset
         let current_interval_remaining_percent: Double?
+        let current_interval_status: Int?
         // weekly window
         let weekly_start_time: Double?
         let weekly_end_time: Double?                  // epoch ms — weekly reset
         let current_weekly_remaining_percent: Double?
+        let current_weekly_status: Int?
+
+        /// MiniMax marks an uncapped window with status 3 (verified: the coding plan's
+        /// weekly is unlimited and always returns status 3 / 100% remaining, as does an
+        /// unused model class). Surface that as a real "Unlimited" meter, not a 0% bar.
+        static let unlimitedStatus = 3
 
         var metrics: [Metric] {
             [window(label: "5h window",
-                    remaining: current_interval_remaining_percent,
+                    remaining: current_interval_remaining_percent, status: current_interval_status,
                     startMs: start_time, endMs: end_time),
              window(label: "weekly",
-                    remaining: current_weekly_remaining_percent,
+                    remaining: current_weekly_remaining_percent, status: current_weekly_status,
                     startMs: weekly_start_time, endMs: weekly_end_time)]
                 .compactMap { $0 }
         }
 
-        private func window(label: String, remaining: Double?,
+        private func window(label: String, remaining: Double?, status: Int?,
                             startMs: Double?, endMs: Double?) -> Metric? {
             guard let remaining else { return nil }
+            if status == Self.unlimitedStatus {
+                return Metric(label: label, unit: .percent, unlimited: true)
+            }
             let reset = dateFromEpochMillis(endMs)
             let dur: TimeInterval? = (startMs != nil && endMs != nil)
                 ? (endMs! - startMs!) / 1000.0 : nil

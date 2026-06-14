@@ -8,6 +8,8 @@ Claude, Codex, GLM (z.ai), MiniMax, and Kimi each have their own usage dashboard
 
 ![The popover, light and dark](assets/popover.png)
 
+The popover follows your macOS appearance automatically — Light and Dark shown side by side above.
+
 ## Providers
 
 All providers are optional and toggle on/off in Settings. The default set works with zero or near-zero setup.
@@ -58,6 +60,14 @@ swift run headroom doctor         # collector health + live readings
 - **Non-destructive refresh.** A failed poll keeps the last good reading (dimmed, "as of <when>") instead of flashing to empty.
 
 Settings also covers a configurable refresh interval, refresh-on-wake, launch-at-login, and threshold notifications (75/90/95%, off by default).
+
+![Settings — providers, appearance, notifications](assets/settings.png)
+
+## Usage history
+
+A local trend view: per-day token totals from Claude and Codex's own logs, a 30-day utilization sparkline for every provider, an export to CSV or JSON, and a "Resets" timeline of every capped window. All stored locally, never sent anywhere.
+
+![Usage history — trend, heatmap, totals](assets/history.png)
 
 ## Architecture
 

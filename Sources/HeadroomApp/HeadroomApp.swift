@@ -85,7 +85,14 @@ struct HeadroomApp: App {
         }
         .defaultSize(width: 720, height: 480)
 
-        Settings { SettingsView(model: model) }
+        // A regular Window, not the `Settings` scene: the `Settings` scene won't surface
+        // from an `.accessory` MenuBarExtra app (showSettingsWindow: returns true but opens
+        // nothing — verified), so we open this with openWindow like the other windows.
+        Window("Settings", id: "settings") {
+            SettingsView(model: model)
+        }
+        .defaultSize(width: 460, height: 480)
+        .windowResizability(.contentSize)
     }
 }
 
@@ -100,18 +107,28 @@ struct MenuBarLabel: View {
     var body: some View {
         // One hat+% per chosen item: a single aggregate hat for tightest/hat-only,
         // or up to three provider hats side by side for the multi-metric bar.
-        HStack(spacing: 7) {
+        let style = model.prefs.glyphStyle
+        return HStack(spacing: 7) {
             ForEach(model.glyphItems) { item in
                 HStack(spacing: 3) {
-                    Image(nsImage: Self.hatImage(for: item.fraction))
+                    Image(nsImage: Self.glyphImage(for: item.fraction, style: style))
                     if model.showGlyphPercent, let f = item.fraction {
                         Text("\(Int((f * 100).rounded()))%")
                             .font(.system(size: 11, weight: .semibold).monospacedDigit())
                             .foregroundStyle(Self.tint(for: f))
                     }
                 }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(Self.a11y(item))
             }
         }
+        .accessibilityLabel("Headroom usage")
+    }
+
+    private static func a11y(_ item: AppModel.GlyphItem) -> String {
+        let who = item.id == "_tightest" ? "tightest meter" : Prefs.displayName(item.id)
+        guard let f = item.fraction else { return "Headroom, \(who), no data" }
+        return "Headroom, \(who) \(Int((f * 100).rounded())) percent used"
     }
 
     // Menu-bar items resolve their own light/dark; the warm ramp reads on both.
@@ -120,10 +137,15 @@ struct MenuBarLabel: View {
         return Color(hex: Theme.light.ramp(fraction: f))
     }
 
-    @MainActor private static func hatImage(for fraction: Double?) -> NSImage {
-        let renderer = ImageRenderer(content:
-            ChefHatGauge(fraction: fraction ?? 0, tint: tint(for: fraction))
-                .frame(width: 16, height: 16))
+    @MainActor private static func glyphImage(for fraction: Double?, style: GlyphStyle) -> NSImage {
+        let f = fraction ?? 0
+        let c = tint(for: fraction)
+        let content: AnyView = switch style {
+        case .hat:     AnyView(ChefHatGauge(fraction: f, tint: c).frame(width: 16, height: 16))
+        case .bar:     AnyView(BarGauge(fraction: f, tint: c))
+        case .battery: AnyView(BatteryGauge(fraction: f, tint: c))
+        }
+        let renderer = ImageRenderer(content: content)
         renderer.scale = NSScreen.main?.backingScaleFactor ?? 2
         guard let img = renderer.nsImage else { return NSImage() }
         img.isTemplate = false   // keep the warm tier color, don't monochrome it
@@ -138,11 +160,12 @@ struct MenuBarLabel: View {
 /// Note: `--shoot settings` logs ~68 benign "AttributeGraph: cycle detected" lines and
 /// still captures a correct PNG. That cycle is an artifact of hosting a control-heavy
 /// view (Buttons/SecureField/SF-Symbol Labels) in a bare `NSHostingView` here; it does
-/// NOT occur in the shipped app, which presents Settings via the SwiftUI `Settings { }`
-/// scene (verified 0 cycles in normal launch + the real settings action). History shoots
-/// clean because it has no interactive controls. Don't re-bisect — it's harness-only.
+/// NOT occur in the shipped app, which presents Settings as a normal Window scene opened
+/// via openWindow (verified 0 cycles in normal launch). History shoots clean because it
+/// has no interactive controls. Don't re-bisect — it's harness-only.
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var shotWindow: NSWindow?
+    private var onboardingWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         if let shot = AppLaunchFlags.shootPath {
@@ -150,7 +173,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             renderAndShoot(AppLaunchFlags.openWindowID ?? "history", to: shot)
             return
         }
+        // Single-instance: if another Headroom is already running, hand off to it and quit
+        // so we never stack two menu-bar hats.
+        if let bid = Bundle.main.bundleIdentifier {
+            let others = NSRunningApplication.runningApplications(withBundleIdentifier: bid)
+                .filter { $0.processIdentifier != NSRunningApplication.current.processIdentifier }
+            if let existing = others.first {
+                existing.activate()
+                NSApp.terminate(nil)
+                return
+            }
+        }
         NSApp.setActivationPolicy(.accessory)
+        if !Prefs.shared.hasOnboarded { showOnboarding() }
+    }
+
+    /// First-run welcome, shown once. Marked onboarded the moment it's shown (so it never
+    /// reappears even if dismissed via the close button). An accessory app isn't frontmost,
+    /// so activate + key-and-front to surface it. Built as a plain NSWindow (deterministic
+    /// from here; the menu-bar label renders too lazily to drive an openWindow on launch).
+    @MainActor private func showOnboarding() {
+        Prefs.shared.hasOnboarded = true
+        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 560),
+                           styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        win.title = "Welcome to Headroom"
+        win.isReleasedWhenClosed = false
+        win.center()
+        let view = OnboardingView(prefs: .shared) { [weak self] in
+            self?.onboardingWindow?.close()
+            self?.onboardingWindow = nil
+        }
+        win.contentView = NSHostingView(rootView: view)
+        onboardingWindow = win
+        NSApp.activate(ignoringOtherApps: true)
+        win.makeKeyAndOrderFront(nil)
     }
 
     @MainActor private func renderAndShoot(_ id: String, to path: String) {

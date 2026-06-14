@@ -16,25 +16,82 @@ struct SettingsView: View {
     @Environment(\.colorScheme) private var scheme
     @Environment(\.openWindow) private var openWindow
 
+    @State private var tab: Tab = .providers
+
+    enum Tab: String, CaseIterable, Identifiable {
+        case providers, appearance, general, about
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .providers: "Providers"
+            case .appearance: "Appearance"
+            case .general: "General"
+            case .about: "About"
+            }
+        }
+        var icon: String {
+            switch self {
+            case .providers: "square.stack.3d.up"
+            case .appearance: "paintpalette"
+            case .general: "gearshape"
+            case .about: "info.circle"
+            }
+        }
+    }
+
     var body: some View {
         let skin = Skin(scheme)
-        TabView {
-            ProvidersTab(model: model, skin: skin, openLogin: openLogin)
-                .tabItem { Label("Providers", systemImage: "square.stack.3d.up") }
-            AppearanceTab(prefs: model.prefs, skin: skin)
-                .tabItem { Label("Appearance", systemImage: "paintpalette") }
-            GeneralTab(prefs: model.prefs, skin: skin)
-                .tabItem { Label("General", systemImage: "gearshape") }
-            AboutTab(skin: skin)
-                .tabItem { Label("About", systemImage: "info.circle") }
+        VStack(spacing: 0) {
+            // Custom segmented header: always-visible icon+label tabs. A plain Window's
+            // TabView collapses into a "Navigation Tab Bar" overflow popup on recent macOS,
+            // so we draw our own in the cookbook palette and switch content ourselves.
+            HStack(spacing: 6) {
+                ForEach(Tab.allCases) { t in
+                    let on = tab == t
+                    Button { tab = t } label: {
+                        VStack(spacing: 4) {
+                            Image(systemName: t.icon).font(.system(size: 15))
+                            Text(t.title).font(.caption.weight(on ? .semibold : .regular))
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                        .foregroundStyle(on ? skin.ink : skin.ink2)
+                        .background(on ? skin.card : Color.clear,
+                                    in: RoundedRectangle(cornerRadius: 8))
+                        .overlay(RoundedRectangle(cornerRadius: 8)
+                            .strokeBorder(on ? skin.edge : Color.clear, lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(8)
+            .background(skin.bg2)
+
+            Rectangle().fill(skin.edge).frame(height: 1)
+
+            // Each tab view manages its own scroll/form.
+            Group {
+                switch tab {
+                case .providers:  ProvidersTab(model: model, skin: skin, openLogin: openLogin)
+                case .appearance: AppearanceTab(prefs: model.prefs, skin: skin)
+                case .general:    GeneralTab(prefs: model.prefs, skin: skin)
+                case .about:      AboutTab(skin: skin)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(width: 460, height: 430)
+        .frame(width: 460, height: 480)
         .background(skin.bg)
     }
 
     private func openLogin(_ id: String) {
         model.loginTargetID = id
+        NSApp.activate(ignoringOtherApps: true)
         openWindow(id: "login")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            NSApp.activate(ignoringOtherApps: true)
+            NSApp.windows.first { $0.title == "Log in" }?.makeKeyAndOrderFront(nil)
+        }
     }
 }
 
@@ -73,7 +130,7 @@ private struct ProviderRow: View {
     @State private var keyText = ""
 
     private var enabled: Binding<Bool> {
-        Binding(get: { model.prefs.isEnabled(id) }, set: { model.prefs.setEnabled(id, $0) })
+        Binding(get: { model.prefs.isEnabled(id) }, set: { model.setEnabled(id, $0) })
     }
 
     var body: some View {
@@ -90,7 +147,7 @@ private struct ProviderRow: View {
 
             switch kind {
             case .local:
-                Text("Uses your local CLI session — no setup.").font(.caption).foregroundStyle(skin.faint)
+                Text("Uses your local CLI session. No setup.").font(.caption).foregroundStyle(skin.faint)
             case .key, .web:
                 if model.hasStoredKey(for: id) {
                     HStack(spacing: 8) {
@@ -101,11 +158,15 @@ private struct ProviderRow: View {
                     }
                 } else {
                     HStack(spacing: 6) {
-                        SecureField("Paste API key", text: $keyText)
+                        SecureField(Prefs.pastePlaceholder(id), text: $keyText)
                             .textFieldStyle(.roundedBorder).font(.caption)
                         Button("Save") { model.saveKey(keyText, for: id) }
                             .controlSize(.small).buttonStyle(.bordered).tint(skin.clay)
                             .disabled(keyText.trimmingCharacters(in: .whitespaces).isEmpty)
+                    }
+                    if let note = Prefs.setupNote(id) {
+                        Text(note).font(.caption2).foregroundStyle(skin.faint)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
                 if kind == .web {
@@ -113,7 +174,7 @@ private struct ProviderRow: View {
                         .controlSize(.small).buttonStyle(.borderless).tint(skin.clay)
                 }
             case .login:
-                Text("Log in once in a browser window — no key needed.").font(.caption).foregroundStyle(skin.faint)
+                Text("Log in once in a browser window. No key needed.").font(.caption).foregroundStyle(skin.faint)
                 Button("Log in with browser…") { openLogin(id) }
                     .controlSize(.small).buttonStyle(.borderless).tint(skin.clay)
             }
@@ -191,13 +252,20 @@ private struct AppearanceTab: View {
                     Text("Each shows its own hat + % in the menu bar, in this order. Enable a provider in the Providers tab to pick it here.")
                         .font(.caption).foregroundStyle(skin.faint)
                 } else {
-                    Text("The chef-hat fills and warms with whichever meter you pick.")
+                    Text("The glyph fills and warms with whichever meter you pick.")
                         .font(.caption).foregroundStyle(skin.faint)
                 }
             }
             Section {
+                Picker("Glyph style", selection: $prefs.glyphStyle) {
+                    ForEach(GlyphStyle.allCases) { Text($0.title).tag($0) }
+                }
+                Text("The chef-hat is the family mark. Bar is a flat meter; Battery drains as you spend (reads as charge left).")
+                    .font(.caption).foregroundStyle(skin.faint)
+            }
+            Section {
                 Toggle("Show Claude “Extra usage” row", isOn: $prefs.showClaudeExtraUsage)
-                Text("Off by default — it's a pay-as-you-go $ pool, not subscription headroom, so it never drives the menu-bar glyph.")
+                Text("Off by default. It's a pay-as-you-go $ pool, not subscription headroom, so it never drives the menu-bar glyph.")
                     .font(.caption).foregroundStyle(skin.faint)
             }
         }
@@ -228,6 +296,11 @@ private struct GeneralTab: View {
                 Toggle("Refresh on wake from sleep", isOn: $prefs.refreshOnWake)
             }
             Section {
+                Toggle("Check provider status pages", isOn: $prefs.checkProviderStatus)
+                Text("Shows a “Down/Degraded” badge from Anthropic & OpenAI's public status pages, so a flat meter during an outage reads as their problem, not yours. Read-only, no data sent.")
+                    .font(.caption).foregroundStyle(skin.faint)
+            }
+            Section {
                 Toggle("Launch at login", isOn: $launchAtLogin)
                     .onChange(of: launchAtLogin) { _, want in
                         _ = LoginItem.set(want)
@@ -255,7 +328,9 @@ private struct GeneralTab: View {
                             .toggleStyle(.checkbox)
                         }
                     }
-                    Text("Alerts when a meter crosses a level, naming the window. Quiet — one per crossing.")
+                    Toggle("Play a sound", isOn: $prefs.notifySound)
+                    Toggle("Ping when a window refills", isOn: $prefs.notifyOnReset)
+                    Text("Alerts when a meter crosses a level, naming the window. Quiet: one per crossing.")
                         .font(.caption).foregroundStyle(skin.faint)
                 }
             }

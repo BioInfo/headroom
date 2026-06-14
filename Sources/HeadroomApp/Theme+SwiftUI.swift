@@ -101,3 +101,46 @@ struct ChefHatGauge: View {
             .overlay(ChefHat().stroke(tint, lineWidth: 0.8))
     }
 }
+
+/// A slim horizontal bar that fills left→right with usage, tinted by tier. The flat,
+/// minimal alternative to the hat. Fixed-size, no GeometryReader (so it never collapses
+/// when measured in an ImageRenderer/VStack).
+struct BarGauge: View {
+    let fraction: Double
+    let tint: Color
+    private let w: CGFloat = 16, h: CGFloat = 9
+    var body: some View {
+        let f = min(max(fraction, 0), 1)
+        ZStack(alignment: .leading) {
+            RoundedRectangle(cornerRadius: 2, style: .continuous).fill(tint.opacity(0.22))
+            RoundedRectangle(cornerRadius: 2, style: .continuous).fill(tint)
+                .frame(width: max(1.5, w * f))
+        }
+        .frame(width: w, height: h)
+    }
+}
+
+/// A battery that DRAINS as you spend: the fill shows charge LEFT (1 − usage), colored by
+/// usage tier so a nearly-empty battery reads rust = "almost out." The most literal
+/// "headroom" mark. A nub on the right sells the battery read at menu-bar size. Fixed-size.
+struct BatteryGauge: View {
+    let fraction: Double   // usage 0…1
+    let tint: Color
+    private let bodyW: CGFloat = 14, h: CGFloat = 9, inset: CGFloat = 1.5
+    var body: some View {
+        let remaining = 1 - min(max(fraction, 0), 1)
+        let innerW = bodyW - inset * 2
+        HStack(spacing: 1) {
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 2, style: .continuous)
+                    .strokeBorder(tint.opacity(0.85), lineWidth: 1)
+                RoundedRectangle(cornerRadius: 1.2, style: .continuous).fill(tint)
+                    .frame(width: max(0, innerW * remaining), height: h - inset * 2)
+                    .padding(.leading, inset)
+            }
+            .frame(width: bodyW, height: h)
+            RoundedRectangle(cornerRadius: 0.5).fill(tint.opacity(0.85)).frame(width: 1.5, height: 4)
+        }
+        .frame(height: h)
+    }
+}

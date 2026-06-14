@@ -9,6 +9,37 @@ struct MenuContent: View {
     @Environment(\.openWindow) private var openWindow
     @Environment(\.colorScheme) private var scheme
 
+    /// Open one of our Window scenes from the menu-bar popover. An `.accessory` app
+    /// isn't frontmost, so a bare `openWindow` lands the window BEHIND everything and
+    /// looks dead — activate first, then nudge it to the front (mirrors the proven
+    /// `--open` dev path).
+    private func surface(_ id: String) {
+        NSApp.activate(ignoringOtherApps: true)
+        openWindow(id: id)
+        // Front only the window we just opened, by title — `orderFrontRegardless` on ALL
+        // windows would raise whatever else is open (e.g. History) on top of it.
+        let title = Self.windowTitle(id)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            NSApp.activate(ignoringOtherApps: true)
+            if let w = NSApp.windows.first(where: { $0.title == title }) {
+                w.makeKeyAndOrderFront(nil)
+            }
+        }
+    }
+
+    private static func windowTitle(_ id: String) -> String {
+        switch id {
+        case "history":  "Usage History"
+        case "settings": "Settings"
+        case "login":    "Log in"
+        default:         id
+        }
+    }
+
+    /// Settings is a regular `Window(id: "settings")` (the `Settings` scene won't surface
+    /// from an accessory MenuBarExtra app), so it opens the same proven way as the others.
+    private func openSettings() { surface("settings") }
+
     var body: some View {
         let skin = Skin(scheme)
         VStack(alignment: .leading, spacing: 11) {
@@ -16,11 +47,7 @@ struct MenuContent: View {
             Color.clear.frame(height: 0).task {
                 if let id = AppLaunchFlags.openWindowID {
                     NSApp.activate(ignoringOtherApps: true)
-                    if id == "settings" {
-                        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-                    } else {
-                        openWindow(id: id)
-                    }
+                    openWindow(id: id)
                     try? await Task.sleep(for: .milliseconds(800))
                     NSApp.activate(ignoringOtherApps: true)
                     NSApp.windows.forEach { $0.orderFrontRegardless() }
@@ -43,18 +70,29 @@ struct MenuContent: View {
                 .buttonStyle(.borderless).tint(skin.clay).help("Refresh now")
             }
 
+            if let phrase = model.blendedCapacity.phrase {
+                CapacityRow(summary: model.blendedCapacity, phrase: phrase, skin: skin)
+            }
+
+            if let pick = model.useThisNext {
+                UseThisNextBanner(pick: pick, skin: skin)
+            }
+
             if model.usages.isEmpty {
                 Text("No data yet.").foregroundStyle(skin.faint).font(.callout)
             }
 
             ForEach(model.usages) { usage in
                 ProviderCard(usage: usage, skin: skin,
+                             health: model.serviceHealth[usage.provider],
                              refreshing: model.isRefreshing,
                              canWebLogin: model.loginWebView(for: usage.provider) != nil,
-                             canKey: model.keyService(for: usage.provider) != nil) {
+                             canKey: model.keyService(for: usage.provider) != nil,
+                             onLogin: {
                     model.loginTargetID = usage.provider
-                    openWindow(id: "login")
-                }
+                    surface("login")
+                },
+                             onSettings: { openSettings() })
             }
 
             Rectangle().fill(skin.edge).frame(height: 1)
@@ -64,9 +102,9 @@ struct MenuContent: View {
                         .font(.caption2).foregroundStyle(skin.faint)
                 }
                 Spacer()
-                Button { openWindow(id: "history") } label: { Image(systemName: "chart.bar.xaxis") }
+                Button { surface("history") } label: { Image(systemName: "chart.bar.xaxis") }
                     .buttonStyle(.borderless).tint(skin.ink2).help("Usage history")
-                SettingsLink { Image(systemName: "gearshape") }
+                Button { openSettings() } label: { Image(systemName: "gearshape") }
                     .buttonStyle(.borderless).tint(skin.ink2).help("Settings")
                 Button("Quit") { NSApplication.shared.terminate(nil) }
                     .buttonStyle(.borderless).tint(skin.ink2).font(.caption)
@@ -78,34 +116,111 @@ struct MenuContent: View {
     }
 }
 
+// MARK: - Blended capacity (the at-a-glance cross-provider read)
+
+/// One quiet line: "3 comfortable · 1 tight · 1 unlimited" — the whole point of a
+/// multi-provider tool, summarized before you scan the cards. Tinted by the worst bucket
+/// present so the line itself signals overall pressure.
+struct CapacityRow: View {
+    let summary: CapacitySummary
+    let phrase: String
+    let skin: Skin
+
+    /// Color the leading dot by the hottest bucket present.
+    private var tier: UsageTier {
+        if summary.count(.tight) > 0 { return .pressing }
+        if summary.count(.warming) > 0 { return .warming }
+        return .healthy
+    }
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Circle().fill(skin.ramp(tier)).frame(width: 7, height: 7)
+            Text(phrase).font(.caption).foregroundStyle(skin.ink2)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 2)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Capacity across providers: \(phrase)")
+    }
+}
+
+// MARK: - "Use this next" hint (the signature multi-provider nudge)
+
+/// When the hottest subscription is low on headroom, point at the roomiest one. The one
+/// thing a single-provider tracker structurally can't tell you.
+struct UseThisNextBanner: View {
+    let pick: AppModel.NextPick
+    let skin: Skin
+    var body: some View {
+        HStack(spacing: 7) {
+            Image(systemName: "arrow.turn.down.right")
+                .font(.caption.weight(.bold)).foregroundStyle(skin.ramp(.healthy))
+            (Text(pick.hotName).fontWeight(.semibold)
+             + Text(" \(Int((pick.hotFraction*100).rounded()))% used · most room: ")
+             + Text(pick.roomName).fontWeight(.semibold)
+             + Text(" \(Int((pick.roomFraction*100).rounded()))%"))
+                .font(.caption).foregroundStyle(skin.ink2)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 9).padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 8).fill(skin.ramp(.healthy).opacity(0.10)))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(skin.ramp(.healthy).opacity(0.30), lineWidth: 1))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Use this next: \(pick.hotName) is \(Int((pick.hotFraction*100).rounded())) percent used. Most room: \(pick.roomName) at \(Int((pick.roomFraction*100).rounded())) percent.")
+    }
+}
+
 // MARK: - One provider
 
 struct ProviderCard: View {
     let usage: ProviderUsage
     let skin: Skin
+    var health: ServiceHealth? = nil
     var refreshing: Bool = false
     var canWebLogin: Bool = false
     var canKey: Bool = false
     var onLogin: () -> Void
+    var onSettings: () -> Void = {}
 
     /// Stale data, or a refresh in flight over a still-shown reading: dim the meters so
     /// the number reads as "not live right now" without the card flashing to empty.
     private var dim: Bool { usage.status == .stale || (refreshing && !usage.metrics.isEmpty) }
 
+    /// Open the provider's own usage dashboard (the source of truth this card indexes).
+    private var dashboard: URL? { ProviderInfo.dashboardURL(usage.provider) }
+
+    private var cardHeader: some View {
+        HStack(spacing: 6) {
+            ProviderBadge(id: usage.provider, skin: skin)
+            Text(usage.displayName)
+                .font(.subheadline.weight(.semibold)).foregroundStyle(skin.ink)
+            if let plan = usage.plan {
+                Text(plan.uppercased())
+                    .font(.caption2.weight(.bold)).foregroundStyle(skin.bg2)
+                    .padding(.horizontal, 5).padding(.vertical, 1.5)
+                    .background(skin.clay, in: Capsule())
+            }
+            Spacer()
+            if let health, health.isNotable {
+                ServiceHealthPill(health: health, skin: skin)
+            }
+            if dashboard != nil {
+                Image(systemName: "arrow.up.right.square")
+                    .font(.caption2).foregroundStyle(skin.faint)
+            }
+            StatusDot(status: usage.status, skin: skin)
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
-            HStack(spacing: 6) {
-                Text(usage.displayName)
-                    .font(.subheadline.weight(.semibold)).foregroundStyle(skin.ink)
-                if let plan = usage.plan {
-                    Text(plan.uppercased())
-                        .font(.caption2.weight(.bold)).foregroundStyle(skin.bg2)
-                        .padding(.horizontal, 5).padding(.vertical, 1.5)
-                        .background(skin.clay, in: Capsule())
-                }
-                Spacer()
-                StatusDot(status: usage.status, skin: skin)
-            }
+            cardHeader
+                .contentShape(Rectangle())
+                .onTapGesture { if let url = dashboard { NSWorkspace.shared.open(url) } }
+                .help(dashboard != nil ? "Open \(usage.displayName)'s usage dashboard" : "")
 
             switch usage.status {
             case .needsLogin:
@@ -113,10 +228,10 @@ struct ProviderCard: View {
                     Button("Log in", action: onLogin)
                         .controlSize(.small).buttonStyle(.bordered).tint(skin.clay)
                 } else if canKey {
-                    SettingsLink { Text("Add a key in Settings →").font(.caption) }
+                    Button { onSettings() } label: { Text("Add a key in Settings →").font(.caption) }
                         .buttonStyle(.borderless).tint(skin.clay)
                 } else {
-                    Text("No local session — sign in with its CLI.")
+                    Text("No local session. Sign in with its CLI.")
                         .font(.caption).foregroundStyle(skin.faint)
                 }
             case .error:
@@ -146,6 +261,25 @@ struct ProviderCard: View {
     }
 }
 
+/// A small service-health pill on a card when the provider's status page reports trouble —
+/// so a flat meter during an outage reads as "their side is down," not "you're fine."
+struct ServiceHealthPill: View {
+    let health: ServiceHealth
+    let skin: Skin
+    private var label: String { health == .down ? "Down" : "Degraded" }
+    private var color: Color { health == .down ? skin.ramp(.critical) : skin.ramp(.warming) }
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 8))
+            Text(label).font(.caption2.weight(.semibold))
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 5).padding(.vertical, 1.5)
+        .background(color, in: Capsule())
+        .accessibilityLabel("Service \(label.lowercased())")
+    }
+}
+
 struct StatusDot: View {
     let status: Status
     let skin: Skin
@@ -167,9 +301,39 @@ struct GaugeRow: View {
     let skin: Skin
 
     var body: some View {
+        if metric.unlimited {
+            unlimitedRow
+        } else {
+            meteredRow
+        }
+    }
+
+    /// An uncapped window: name it, mark it Unlimited, draw a full faint track (no fill,
+    /// no percent, no reset) so it reads as "infinite headroom here" not "0% used".
+    private var unlimitedRow: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack {
+                Text(metric.label).font(.caption).foregroundStyle(skin.ink2)
+                Spacer()
+                HStack(spacing: 3) {
+                    Image(systemName: "infinity").font(.caption2.weight(.bold))
+                    Text("Unlimited").font(.caption.weight(.medium))
+                }
+                .foregroundStyle(skin.ramp(.healthy))
+            }
+            // A flat olive track signals "open road" without implying a level of use.
+            RoundedRectangle(cornerRadius: 2, style: .continuous)
+                .fill(skin.ramp(.healthy).opacity(0.18))
+                .frame(height: 8)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(metric.label): unlimited, no cap")
+    }
+
+    private var meteredRow: some View {
         let pace = metric.pace()
         let ahead = metric.aheadOfPace()
-        VStack(alignment: .leading, spacing: 3) {
+        return VStack(alignment: .leading, spacing: 3) {
             HStack {
                 Text(metric.label).font(.caption).foregroundStyle(skin.ink2)
                 Spacer()
@@ -186,7 +350,14 @@ struct GaugeRow: View {
                     Text("resets \(reset.formatted(.relative(presentation: .named)))")
                         .font(.caption2).foregroundStyle(skin.faint)
                 }
-                if ahead {
+                if let eta = etaLabel {
+                    if metric.resetAt != nil {
+                        Text("·").font(.caption2).foregroundStyle(skin.faint)
+                    }
+                    Text(eta)
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(skin.ramp(pace?.willExhaust == true ? .pressing : .warming))
+                } else if ahead {
                     if metric.resetAt != nil {
                         Text("·").font(.caption2).foregroundStyle(skin.faint)
                     }
@@ -196,6 +367,39 @@ struct GaugeRow: View {
                 }
             }
         }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(accessibilityText)
+    }
+
+    /// Burn-rate ETA (Tier 1 #2): once enough of the window has elapsed and you're ahead of
+    /// pace, name where this lands — "empties ~3:40pm" if projected to exhaust, else
+    /// "lands ~140%". Gated to ahead-of-pace so it isn't noisy when you're coasting.
+    private var etaLabel: String? {
+        guard let p = metric.pace(), metric.aheadOfPace(), let reset = metric.resetAt,
+              let dur = metric.windowDuration, dur > 0, let used = metric.fractionUsed,
+              used > 0 else { return nil }
+        if p.willExhaust {
+            // time to hit 1.0 at the current rate, projected from now
+            let rate = used / max(p.elapsed, 0.0001)              // fraction per window-fraction
+            let fractionToFull = (1.0 - used) / max(rate, 0.0001) // window-fractions remaining
+            let when = Date().addingTimeInterval(fractionToFull * dur)
+            // A bare clock time only reads right intra-day. If exhaustion is more than ~16h
+            // out (the weekly case), show the projected landing % instead of a misleading
+            // "~9:55 AM" that looks like today.
+            if when < reset, when.timeIntervalSinceNow < 16 * 3600 {
+                return "empties ~\(when.formatted(date: .omitted, time: .shortened))"
+            }
+        }
+        return "lands ~\(Int((p.projected * 100).rounded()))%"
+    }
+
+    private var accessibilityText: String {
+        var s = metric.label
+        if let p = metric.percentUsed { s += ", \(Int(p.rounded())) percent used" }
+        else if let u = metric.used, let l = metric.limit { s += ", \(Int(u)) of \(Int(l))" }
+        if let reset = metric.resetAt { s += ", resets \(reset.formatted(.relative(presentation: .named)))" }
+        if let eta = etaLabel { s += ", \(eta)" }
+        return s
     }
 
     private var rightLabel: String {

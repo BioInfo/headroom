@@ -26,9 +26,9 @@ Columns: **login** (how the session is obtained) · **usage endpoint** (the inte
   - **"Works for everyone" caveat:** unlike Claude Code (`.credentials.json`/Keychain) and Codex (`~/.codex`), GLM has **no single canonical local key store** — the user wires it however (env var when used as a Claude Code backend: `ANTHROPIC_AUTH_TOKEN`; or `ZHIPUAI_API_KEY`/`Z_AI_API_KEY`/`GLM_API_KEY`; or a config file). So the GLM collector needs a key-resolution chain (env vars → known config paths → paste-once in-app), with the WKWebView login kept as the last-resort fallback. **OPEN DESIGN DECISION** before refactoring `ZaiCollector` key-first.
 - **Status:** CAPTURED. Current collector uses WKWebView; refactor to local-key-first pending the key-source decision above.
 
-## Kimi — `kimi`  ✅ CAPTURED + BUILT 2026-06-14 (webview session-replay, like GLM)
+## Kimi — `kimi`  ✅ CAPTURED + BUILT 2026-06-14 (token-paste, no webview — confirmed live)
 
-DevTools spike on the logged-in `kimi.com/code/console` session captured the on-target coding-plan quota. Webview-only: cookie-alone auth is rejected and the Moonshot key is the wrong meter, so this mirrors the z.ai webview pattern.
+DevTools spike on the logged-in `kimi.com/code/console` session captured the on-target coding-plan quota. Kimi signs in with Google, and Google blocks OAuth in embedded webviews (the UA trick is dead, verified 2026-06-14), so there is NO in-app webview. Instead the session JWT rides as a plain Bearer with **no cookie** (verified `credentials:"omit"` → 200), so this is the MiniMax/GLM stateless-key pattern: the user pastes `localStorage.access_token` once. **Confirmed live 2026-06-14:** token pulled from the logged-in browser, stored in keychain `Headroom-kimi-token`, `headroom doctor` → plan=Allegretto, 5h 58% / plan window 22%. ~30-day JWT (expiry 2026-07-14).
 
 - **Usage endpoint:** `POST https://www.kimi.com/apiv2/kimi.gateway.billing.v1.BillingService/GetUsages` (Connect-RPC), request body `{"scope":["FEATURE_CODING"]}`, header `connect-protocol-version: 1`.
 - **Auth:** `Authorization: Bearer <JWT>`. The JWT lives in **`localStorage.access_token`** (the `kimi-auth` cookie is httpOnly; cookie-only fetch → 401 `REASON_INVALID_AUTH_TOKEN`). The webview probe reads `localStorage.access_token` in-page and builds the header — the token never leaves the webview.
@@ -39,9 +39,9 @@ DevTools spike on the logged-in `kimi.com/code/console` session captured the on-
   - `resetTime` is ISO-8601 with microseconds + `Z`; the probe converts to epoch ms in-page (`new Date(...).getTime()`) so Swift reuses `dateFromEpochMillis`.
 - **Plan name:** `POST .../kimi.gateway.membership.v2.MembershipService/GetSubscription` (body `{}`) → `subscription.goods.title` (e.g. "Allegretto").
 - **Reset semantics:** rolling 5-hour sub-window + a longer plan-period cap, each its own `resetTime`. Matches Claude/Codex/MiniMax.
-- **Auth model = needsLogin:** missing `access_token` or a 401 → `.needsLogin` (log in once inside Headroom's webview). Parse locked by `KimiCollectorTests`.
-- **License note:** endpoint + Bearer + field names found by a DevTools spike on a logged-in session; no code copied. Token never stored, logged, or committed.
-- **Status:** BUILT + wired into `AppModel` (webview, off by default until the one-time in-app login). Not in the headless CLI list (needs the webview).
+- **Auth model = needsLogin:** missing token or a 401 → `.needsLogin` ("paste a fresh token"). Keychain service `Headroom-kimi-token`, resolved via `LocalKey` (keychain → `KIMI_TOKEN`/`KIMI_ACCESS_TOKEN` env). Parse locked by `KimiCollectorTests`.
+- **License note:** endpoint + Bearer + field names found by a DevTools spike on a logged-in session; no code copied. Token never printed to logs/chat or committed (pulled via the clipboard straight into the keychain).
+- **Status:** BUILT + wired into `AppModel` + the headless CLI (stateless `URLSession` struct, like MiniMax). Default-enabled (paste-once, like MiniMax/GLM).
 
 ## MiniMax — `minimax`  ✅ BUILT 2026-06-13 (browser-free, local coding-plan key)
 
@@ -53,8 +53,9 @@ The GLM hypothesis held: MiniMax's usage endpoint accepts the coding-plan subscr
   - One entry per model class: `general` (= text/coding plan, what we surface) and `video`. v1 shows only `general`.
   - `*_remaining_percent` is REMAINING → `percentUsed = 100 - it`. Times are **epoch milliseconds**; `end_time`/`weekly_end_time` are resets; window length = `(end - start)/1000` (5h interval = 18000s).
   - Errors come back HTTP 200 with `base_resp.status_code != 0`: `2049` = invalid key → `.needsLogin`; other non-zero → `.error`.
-- **Reset semantics:** rolling 5-hour interval + weekly window, each its own start/end. Matches Claude/Codex.
-- **Verified live:** `headroom doctor` → plan=Coding, 5h 2% used, weekly 0%. Parse locked by `MiniMaxCollectorTests`.
+  - **Unlimited windows (`current_*_status: 3`):** a window with `status == 3` is uncapped, returning `remaining_percent: 100` forever. On the coding plan the **weekly is unlimited** (status 3), as is any unused model class (`video`). Headroom renders these as a real **`Metric.unlimited`** ("Unlimited", no bar) instead of a misleading 0%, and excludes them from gauges/tightest/notify/history. (Status 1 = the active limited 5h window. Other status values unobserved → treated as limited.) Confirmed against the live response + Justin 2026-06-14.
+- **Reset semantics:** rolling 5-hour interval + weekly window, each its own start/end. Matches Claude/Codex. The weekly carries a reset boundary but, being uncapped, Headroom drops it (no depletion to reset).
+- **Verified live:** `headroom doctor` → plan=Coding, 5h ~11% used, weekly "unlimited (no cap)". Parse locked by `MiniMaxCollectorTests`.
 - **License note:** endpoint + Bearer + field names found by probing a real key against the documented endpoint; no code copied.
 - **Status:** BUILT + wired into the CLI headless list and `AppModel`. Browser-free.
 
@@ -92,6 +93,7 @@ The GLM hypothesis held: MiniMax's usage endpoint accepts the coding-plan subscr
 - **Verified live:** matches the Codex app exactly — `plan=plus`, 5h 2% (resets ~2:16 AM ET tonight), Weekly 0% (resets Jun 20 ET). Decode locked by `CodexCollectorTests` (real response + auth.json parse).
 - **Status mapping:** 200 → `.ok`. 401/403 (token expired) → `.stale` (app/CLI will refresh). No `auth.json` → `.needsLogin`.
 - **Status:** BUILT + wired into the CLI host and app. Browser-free + live.
+- **Token history backfill (2026-06-14):** the *current usage* comes from the live endpoint above, but the rollout logs we abandoned for usage are perfect for **token history**. `~/.codex/sessions/**/rollout-*.jsonl` (+ `archived_sessions`) carry `event_msg` lines with `payload.type == "token_count"` and `payload.info.last_token_usage.total_tokens` — the **per-turn delta** (verified: summing it equals the session's final `total_token_usage.total_tokens`, so no double-count). `UsageHistory.codexTokenSeries` sums these per local day (same pattern as `claudeTokenSeries`); parse locked by `CodexTokenParse` tests. History window shows a Claude/Codex token picker, both warm-cached.
 
 ## Gemini — `gemini`  ❌ REMOVED 2026-06-14 (no comparable headroom meter)
 
@@ -104,3 +106,12 @@ DevTools spike on a logged-in AI Studio session (2026-06-14) confirmed there is 
 ## Grok — `grok`
 
 - Deferred. Not a priority.
+
+## Service status pages (live health, not usage)  ✅ CAPTURED 2026-06-14
+
+Separate from usage: the public Atlassian Statuspage feeds power the Down/Degraded card pill
+(`ProviderStatus` in HeadroomKit), so a flat meter during an outage reads as their problem.
+- **Claude** → `https://status.claude.com/api/v2/status.json`. Note: `status.anthropic.com` **302-redirects** here (verified live 2026-06-14); we point at the canonical host to skip the hop.
+- **Codex (OpenAI)** → `https://status.openai.com/api/v2/status.json` (verified live: `indicator: none | All Systems Operational`).
+- Shape: `{ "status": { "indicator": "none|minor|major|critical", "description": … } }` → operational/degraded/down. Any failure (offline, non-200, bad shape) → `.unknown` (no dot).
+- MiniMax / GLM / Kimi publish no public status page → always `.unknown`. Fetch throttled to 5 min, off the usage-refresh path; toggle in Settings → General (default on, read-only).

@@ -81,8 +81,10 @@ enum Snapshot {
     }
 
     /// Mirrors the live captures in docs/PROVIDERS.md so the rendered look is realistic.
-    /// Windows: 5h reset in 2h → 60% elapsed; weekly reset in 5d → ~29% elapsed. So the
-    /// pace tick sits at 60% / 29% — Codex's 88% fill lands ahead of it (the warning).
+    /// Windows: 5h reset in 2h → 60% elapsed; weekly reset in 5d → ~29% elapsed, so the
+    /// pace tick sits at 60% / 29%. Codex's 92% 5h fill lands ahead of it (the warning +
+    /// burn-rate ETA), and with Codex hot the "use this next" banner points at MiniMax.
+    /// MiniMax's weekly is the unlimited tier (status 3) so it renders "Unlimited".
     static var mock: [ProviderUsage] {
         let h5: TimeInterval = 5 * 3600, week: TimeInterval = 7 * 86400
         let in5h = Date().addingTimeInterval(2 * 3600)
@@ -98,13 +100,26 @@ enum Snapshot {
             ProviderUsage(
                 provider: "codex", displayName: "Codex", plan: "Plus",
                 metrics: [
-                    Metric(label: "5h window", percentUsed: 88, unit: .percent, resetAt: in5h, windowDuration: h5),
-                    Metric(label: "weekly",    percentUsed: 0,  unit: .percent, resetAt: inWeek, windowDuration: week),
+                    Metric(label: "5h window", percentUsed: 92, unit: .percent, resetAt: in5h, windowDuration: h5),
+                    Metric(label: "weekly",    percentUsed: 41, unit: .percent, resetAt: inWeek, windowDuration: week),
                 ], status: .ok),
             ProviderUsage(
-                provider: "zai", displayName: "GLM (z.ai)", plan: "Coding",
+                provider: "minimax", displayName: "MiniMax", plan: "Coding",
                 metrics: [
-                    Metric(label: "prompts", used: 96, limit: 100, unit: .requests, resetAt: in5h),
+                    Metric(label: "5h window", percentUsed: 11, unit: .percent, resetAt: in5h, windowDuration: h5),
+                    Metric(label: "weekly", unit: .percent, unlimited: true),
+                ], status: .ok),
+            ProviderUsage(
+                provider: "zai", displayName: "GLM (z.ai)", plan: "Pro",
+                metrics: [
+                    Metric(label: "Prompt window", percentUsed: 0, unit: .percent, resetAt: inWeek, windowDuration: week),
+                    Metric(label: "Token budget",  percentUsed: 68, unit: .percent, resetAt: in5h, windowDuration: h5),
+                ], status: .ok),
+            ProviderUsage(
+                provider: "kimi", displayName: "Kimi", plan: "Allegretto",
+                metrics: [
+                    Metric(label: "5h window",   percentUsed: 58, unit: .percent, resetAt: in5h, windowDuration: h5),
+                    Metric(label: "Plan window", percentUsed: 22, unit: .percent, resetAt: inWeek, windowDuration: week),
                 ], status: .ok),
         ]
     }

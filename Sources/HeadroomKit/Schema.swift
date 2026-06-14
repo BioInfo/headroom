@@ -39,10 +39,15 @@ public struct Metric: Codable, Sendable, Identifiable {
     public let windowDuration: TimeInterval?
     /// true = a real meter from the provider. false = estimated (e.g. spend vs a known cap).
     public let authoritative: Bool
+    /// The window exists but has no cap — an uncapped/unlimited plan tier (e.g. MiniMax's
+    /// weekly on the coding plan). Renders as "Unlimited", never a 0% bar, and is excluded
+    /// from gauges/tightest/notifications/history (you can't run out of infinite headroom).
+    public let unlimited: Bool
 
     public init(label: String, used: Double? = nil, limit: Double? = nil,
                 percentUsed: Double? = nil, unit: Unit, resetAt: Date? = nil,
-                windowDuration: TimeInterval? = nil, authoritative: Bool = true) {
+                windowDuration: TimeInterval? = nil, authoritative: Bool = true,
+                unlimited: Bool = false) {
         self.label = label
         self.used = used
         self.limit = limit
@@ -51,11 +56,13 @@ public struct Metric: Codable, Sendable, Identifiable {
         self.resetAt = resetAt
         self.windowDuration = windowDuration
         self.authoritative = authoritative
+        self.unlimited = unlimited
     }
 
     /// Fraction used in 0...1 for gauge rendering (bar width), derived from whichever
-    /// fields are present. Clamped at both ends.
+    /// fields are present. Clamped at both ends. nil for unlimited meters (no cap → no bar).
     public var fractionUsed: Double? {
+        if unlimited { return nil }
         if let p = percentUsed { return min(max(p / 100.0, 0), 1) }
         if let u = used, let l = limit, l > 0 { return min(max(u / l, 0), 1) }
         return nil
@@ -64,6 +71,7 @@ public struct Metric: Codable, Sendable, Identifiable {
     /// Like `fractionUsed` but NOT clamped at the top, so over-cap meters (e.g. extra
     /// usage past 100%) can drive the `runaway` tier color. Use for severity, not width.
     public var severityFraction: Double? {
+        if unlimited { return nil }
         if let p = percentUsed { return max(p / 100.0, 0) }
         if let u = used, let l = limit, l > 0 { return max(u / l, 0) }
         return nil

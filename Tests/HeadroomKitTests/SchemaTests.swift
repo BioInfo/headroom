@@ -18,6 +18,14 @@ import Foundation
     #expect(Int(d!.timeIntervalSince1970) == 1781962675)
 }
 
+@Test func unlimitedMeterHasNoFraction() {
+    let m = Metric(label: "weekly", unit: .percent, unlimited: true)
+    #expect(m.unlimited)
+    #expect(m.fractionUsed == nil)       // no bar, excluded from tightest
+    #expect(m.severityFraction == nil)   // never drives a tier color
+    #expect(m.pace() == nil)             // no pace projection on an uncapped window
+}
+
 @Test func usageEncodes() throws {
     let u = ProviderUsage(provider: "zai", displayName: "GLM (z.ai)", plan: "pro",
                           metrics: [Metric(label: "tokens", percentUsed: 11, unit: .percent)])

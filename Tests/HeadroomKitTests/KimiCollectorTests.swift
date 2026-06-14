@@ -2,26 +2,25 @@ import Testing
 import Foundation
 @testable import HeadroomKit
 
-// Shape captured 2026-06-14 from the in-page probe over
-// kimi.gateway.billing.v1.BillingService/GetUsages (scope FEATURE_CODING) + GetSubscription.
-// The probe normalizes Kimi's used/100 values and ISO reset strings to {percentUsed, resetMs}.
-private let kimiProbeJSON = """
-{"ok":true,"plan":"Allegretto","windows":[
-  {"label":"5h window","percentUsed":39,"resetMs":1781442447898,"durationSec":18000},
-  {"label":"Plan window","percentUsed":18,"resetMs":1781622447898,"durationSec":null}
-]}
+// Real GetUsages response captured 2026-06-14 from
+// kimi.gateway.billing.v1.BillingService/GetUsages (scope FEATURE_CODING), Bearer-only
+// (no cookie — verified credentials:"omit" → 200). Values are counts out of limit "100",
+// i.e. already percentages; resetTime is ISO-8601 with microseconds + Z.
+private let kimiUsagesJSON = """
+{"usages":[{"scope":"FEATURE_CODING",
+  "detail":{"limit":"100","used":"18","remaining":"82","resetTime":"2026-06-16T15:07:27.898421Z"},
+  "limits":[{"window":{"duration":300,"timeUnit":"TIME_UNIT_MINUTE"},
+    "detail":{"limit":"100","used":"39","remaining":"61","resetTime":"2026-06-14T14:07:27.898421Z"}}]}],
+ "totalQuota":{"limit":"100","used":"34","remaining":"66"}}
 """
 
-@MainActor
-@Test func kimiDecodesProbeAndBuildsMetrics() throws {
-    let probe = try JSONDecoder().decode(KimiCollector.Probe.self, from: Data(kimiProbeJSON.utf8))
-    #expect(probe.ok)
-    #expect(probe.plan == "Allegretto")
+@Test func kimiParsesUsagesIntoMetrics() throws {
+    let usage = KimiCollector.parse(Data(kimiUsagesJSON.utf8), id: "kimi", displayName: "Kimi", plan: "Allegretto")
+    #expect(usage.status == .ok)
+    #expect(usage.plan == "Allegretto")
+    #expect(usage.metrics.count == 2)
 
-    let metrics = KimiCollector.metrics(from: probe.windows ?? [])
-    #expect(metrics.count == 2)
-
-    let fiveH = metrics[0]
+    let fiveH = usage.metrics[0]
     #expect(fiveH.label == "5h window")
     #expect(fiveH.percentUsed == 39)
     #expect(fiveH.unit == .percent)
@@ -29,16 +28,14 @@ private let kimiProbeJSON = """
     #expect(fiveH.resetAt != nil)
     #expect(fiveH.fractionUsed == 0.39)
 
-    let plan = metrics[1]
+    let plan = usage.metrics[1]
     #expect(plan.label == "Plan window")
     #expect(plan.percentUsed == 18)
     #expect(plan.windowDuration == nil)       // no fixed length → no even-burn line
+    #expect(plan.resetAt != nil)
 }
 
-@MainActor
-@Test func kimiNoSessionMapsToNeedsLogin() throws {
-    let json = #"{"ok":false,"reason":"no-session"}"#
-    let probe = try JSONDecoder().decode(KimiCollector.Probe.self, from: Data(json.utf8))
-    #expect(!probe.ok)
-    #expect(probe.reason == "no-session")
+@Test func kimiEmptyResponseIsError() throws {
+    let usage = KimiCollector.parse(Data(#"{"usages":[]}"#.utf8), id: "kimi", displayName: "Kimi", plan: nil)
+    #expect(usage.status == .error)
 }

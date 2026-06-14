@@ -24,8 +24,11 @@ final class Notifier {
     }
 
     /// Compare the latest readings against the configured thresholds and post for any
-    /// fresh crossing. `thresholds` are percents (e.g. [75, 90, 95]).
-    func evaluate(_ usages: [ProviderUsage], thresholds: [Int], enabled: Bool) {
+    /// fresh crossing. `thresholds` are percents (e.g. [75, 90, 95]). When `onReset` is on,
+    /// a meter that falls back below every threshold (its window refilled) pings once that
+    /// you've got that subscription back.
+    func evaluate(_ usages: [ProviderUsage], thresholds: [Int], enabled: Bool,
+                  sound: Bool = true, onReset: Bool = false) {
         guard enabled else { firedAt.removeAll(); return }
         let sorted = thresholds.sorted()
         for u in usages {
@@ -37,25 +40,39 @@ final class Notifier {
                 if let c = crossed {
                     if prior == nil || c > prior! {     // new, higher crossing
                         post(provider: u.displayName, meter: m.label, percent: Int(pct.rounded()),
-                             reset: m.resetAt)
+                             reset: m.resetAt, sound: sound)
                         firedAt[key] = c
                     }
                 } else {
-                    firedAt[key] = nil                  // dropped below all → window reset
+                    if prior != nil, onReset {          // had alerted, now back under all → refilled
+                        postReset(provider: u.displayName, meter: m.label, sound: sound)
+                    }
+                    firedAt[key] = nil                  // window reset
                 }
             }
         }
     }
 
-    private func post(provider: String, meter: String, percent: Int, reset: Date?) {
+    private func post(provider: String, meter: String, percent: Int, reset: Date?, sound: Bool) {
         guard authorized, let center else { return }
         let content = UNMutableNotificationContent()
-        content.title = "\(provider) — \(percent)% used"
+        content.title = "\(provider): \(percent)% used"
         var body = "\(meter) is at \(percent)%."
         if let reset { body += " Resets \(reset.formatted(.relative(presentation: .named)))." }
         content.body = body
-        content.sound = .default
+        if sound { content.sound = .default }
         let req = UNNotificationRequest(identifier: "\(provider)-\(meter)-\(percent)",
+                                        content: content, trigger: nil)
+        center.add(req)
+    }
+
+    private func postReset(provider: String, meter: String, sound: Bool) {
+        guard authorized, let center else { return }
+        let content = UNMutableNotificationContent()
+        content.title = "\(provider): back under"
+        content.body = "\(meter) refilled. You've got headroom again."
+        if sound { content.sound = .default }
+        let req = UNNotificationRequest(identifier: "\(provider)-\(meter)-reset",
                                         content: content, trigger: nil)
         center.add(req)
     }

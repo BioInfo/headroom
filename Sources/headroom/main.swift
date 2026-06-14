@@ -17,10 +17,10 @@ func emit(_ usages: [ProviderUsage]) {
     }
 }
 
-/// Collectors that need no WKWebView run here (Claude + Codex read local creds/logs,
-/// MiniMax uses a local key). The web collector (zai) needs the app's window context,
-/// so it runs in Headroom.app.
-let headless: [any Collector] = [ClaudeCollector(), CodexCollector(), MiniMaxCollector()]
+/// Collectors that need no WKWebView run here: Claude + Codex read local creds/logs,
+/// MiniMax uses a local key, Kimi uses a pasted token (Bearer, no cookie). z.ai's key path
+/// would work headless too, but it keeps a webview fallback so it runs in Headroom.app.
+let headless: [any Collector] = [ClaudeCollector(), CodexCollector(), MiniMaxCollector(), KimiCollector()]
 
 func runHeadlessCollectors() async -> [ProviderUsage] {
     var out: [ProviderUsage] = []
@@ -35,12 +35,16 @@ switch command {
 case "doctor":
     print("headroom doctor")
     print("  schema: ProviderUsage / Metric / Unit / Status — ok")
-    print("  collectors: claude + codex + minimax (local), zai (web, app-context)")
+    print("  collectors: claude + codex + minimax + kimi (local/paste), zai (app-context)")
     for s in await runHeadlessCollectors() {
         print("  \(s.provider): status=\(s.status.rawValue) plan=\(s.plan ?? "-") meters=\(s.metrics.count)")
         for m in s.metrics {
-            let pct = m.percentUsed.map { "\(Int($0.rounded()))%" } ?? "-"
-            print("    \(m.label): \(pct) used" + (m.resetAt.map { ", resets \($0)" } ?? ""))
+            if m.unlimited {
+                print("    \(m.label): unlimited (no cap)")
+            } else {
+                let pct = m.percentUsed.map { "\(Int($0.rounded()))%" } ?? "-"
+                print("    \(m.label): \(pct) used" + (m.resetAt.map { ", resets \($0)" } ?? ""))
+            }
         }
     }
 case "usage", "--json":

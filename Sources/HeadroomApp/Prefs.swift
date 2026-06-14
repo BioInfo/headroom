@@ -1,6 +1,23 @@
 import Foundation
 import Observation
 
+/// The shape of the menu-bar glyph. Orthogonal to `GlyphSource` (what it tracks): this is
+/// how the fill is drawn. The chef-hat is the family mark; bar + battery are alternates for
+/// people who want a flatter or more "charge-left" read.
+enum GlyphStyle: String, CaseIterable, Identifiable {
+    case hat        // the chef-hat gauge, fills with usage (the default family mark)
+    case bar        // a slim horizontal bar, fills with usage
+    case battery    // a battery that DRAINS as you spend — reads as "charge left"
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .hat: "Chef hat"
+        case .bar: "Bar"
+        case .battery: "Battery"
+        }
+    }
+}
+
 /// What the menu-bar % + hat fill should track.
 enum GlyphSource: Equatable {
     case tightest               // the hottest authoritative meter across enabled providers
@@ -43,30 +60,40 @@ final class Prefs {
 
     /// Every provider Headroom knows about, in display order.
     static let allProviderIDs = ["claude", "codex", "minimax", "zai", "kimi"]
-    /// On by default: the providers that work with zero setup (local creds) or a key the
-    /// user likely already has. Kimi is webview-login-only, so it stays off until the user
-    /// logs in once — the popover starts clean.
-    static let defaultEnabled: Set<String> = ["claude", "codex", "minimax", "zai"]
+    /// On by default: every provider Headroom knows about. Local-creds ones (Claude/Codex)
+    /// work with zero setup; key/token ones (MiniMax/GLM/Kimi) show a one-line "add a key"
+    /// prompt until pasted — the discoverable funnel, consistent across all paste providers.
+    static let defaultEnabled: Set<String> = ["claude", "codex", "minimax", "zai", "kimi"]
 
     @ObservationIgnored private let d = UserDefaults.standard
 
     var enabledProviders: Set<String> { didSet { d.set(Array(enabledProviders), forKey: "enabledProviders") } }
     var refreshMinutes: Int           { didSet { d.set(refreshMinutes, forKey: "refreshMinutes") } }
     var notify: Bool                  { didSet { d.set(notify, forKey: "notify") } }
+    var notifySound: Bool             { didSet { d.set(notifySound, forKey: "notifySound") } }
+    var notifyOnReset: Bool           { didSet { d.set(notifyOnReset, forKey: "notifyOnReset") } }
     var notifyThresholds: [Int]       { didSet { d.set(notifyThresholds, forKey: "notifyThresholds") } }
     var showClaudeExtraUsage: Bool    { didSet { d.set(showClaudeExtraUsage, forKey: "showClaudeExtraUsage") } }
     var refreshOnWake: Bool           { didSet { d.set(refreshOnWake, forKey: "refreshOnWake") } }
     var glyphSource: GlyphSource      { didSet { d.set(glyphSource.stored, forKey: "glyphSource") } }
+    var glyphStyle: GlyphStyle        { didSet { d.set(glyphStyle.rawValue, forKey: "glyphStyle") } }
+    var checkProviderStatus: Bool     { didSet { d.set(checkProviderStatus, forKey: "checkProviderStatus") } }
+    var hasOnboarded: Bool            { didSet { d.set(hasOnboarded, forKey: "hasOnboarded") } }
 
     private init() {
         let saved = d.array(forKey: "enabledProviders") as? [String]
         enabledProviders = saved.map(Set.init) ?? Self.defaultEnabled
         refreshMinutes = (d.object(forKey: "refreshMinutes") as? Int) ?? 15
         notify = d.bool(forKey: "notify")                          // default false (quiet)
+        notifySound = (d.object(forKey: "notifySound") as? Bool) ?? true
+        notifyOnReset = (d.object(forKey: "notifyOnReset") as? Bool) ?? false
         notifyThresholds = (d.array(forKey: "notifyThresholds") as? [Int]) ?? [75, 90, 95]
         showClaudeExtraUsage = d.bool(forKey: "showClaudeExtraUsage")
         refreshOnWake = (d.object(forKey: "refreshOnWake") as? Bool) ?? true
         glyphSource = GlyphSource(stored: d.string(forKey: "glyphSource") ?? "tightest")
+        glyphStyle = GlyphStyle(rawValue: d.string(forKey: "glyphStyle") ?? "") ?? .hat
+        checkProviderStatus = (d.object(forKey: "checkProviderStatus") as? Bool) ?? true
+        hasOnboarded = d.bool(forKey: "hasOnboarded")   // default false → show onboarding once
     }
 
     func isEnabled(_ id: String) -> Bool { enabledProviders.contains(id) }
@@ -89,11 +116,31 @@ final class Prefs {
     enum Kind { case local, key, web, login }
     static func kind(_ id: String) -> Kind {
         switch id {
-        case "claude", "codex": .local        // read local creds/logs
+        case "claude", "codex": .local        // read local creds/logs, zero setup
         case "minimax":         .key          // paste-once API key
-        case "zai":             .web          // webview login OR a pasted key
-        case "kimi":            .login        // webview login only (no key path)
-        default:                .login
+        case "kimi":            .key          // paste-once session token (no API key exists)
+        case "zai":             .web          // pasted key (primary) OR browser login (fallback)
+        default:                .key
+        }
+    }
+
+    /// What the paste field accepts, for the placeholder.
+    static func pastePlaceholder(_ id: String) -> String {
+        id == "kimi" ? "Paste session token" : "Paste API key"
+    }
+
+    /// Provider-specific setup instructions under the paste field. Clear steps = the app
+    /// works for as many people as possible, without fighting a (Google-blocked) login.
+    static func setupNote(_ id: String) -> String? {
+        switch id {
+        case "minimax":
+            return "Paste your MiniMax coding-plan key (sk-cp-…). No browser login needed."
+        case "zai":
+            return "Paste your GLM coding-plan key. No browser login needed. (Browser login is a fallback.)"
+        case "kimi":
+            return "At kimi.com (signed in), open the browser DevTools console, run  copy(localStorage.access_token)  and paste here. Works without Google login; lasts ~30 days."
+        default:
+            return nil
         }
     }
 }

@@ -13,6 +13,7 @@ import WebKit
 public final class ZaiCollector: NSObject, Collector {
     public let id = "zai"
     public let displayName = "GLM (z.ai)"
+    public let cadence: RefreshCadence = .relaxed   // drives a WKWebView; poll gently
 
     private let usagePageURL = URL(string: "https://z.ai/manage-apikey/coding-plan/personal/usage")!
     private let quotaURL = URL(string: "https://api.z.ai/api/monitor/usage/quota/limit")!
@@ -36,6 +37,9 @@ public final class ZaiCollector: NSObject, Collector {
         cfg.websiteDataStore = .default()   // persists cookies + localStorage across launches
         self.webView = WKWebView(frame: .zero, configuration: cfg)
         super.init()
+        // z.ai signs in via Google OAuth, which refuses embedded webviews; a desktop
+        // Safari UA lets the login proceed. (The local-key path skips the webview entirely.)
+        self.webView.customUserAgent = WebUserAgent.desktopSafari
         self.webView.navigationDelegate = self
     }
 
