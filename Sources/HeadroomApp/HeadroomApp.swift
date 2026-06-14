@@ -8,11 +8,9 @@ import HeadroomKit
 enum Entry {
     static func main() {
         let args = CommandLine.arguments
-        if let i = args.firstIndex(of: "--snapshot") {
-            let path = args[safe: i + 1] ?? "headroom-snapshot.png"
-            MainActor.assumeIsolated { Snapshot.run(to: path) }
-            return
-        }
+        // `--snapshot` is handled in applicationDidFinishLaunching (a real NSHostingView +
+        // cacheDisplay), NOT here via ImageRenderer — ImageRenderer can't rasterize SF
+        // Symbols and emits the yellow "missing image" placeholder for every symbol button.
         if let i = args.firstIndex(of: "--render-icon") {
             let path = args[safe: i + 1] ?? "icon.png"
             let px = Int(args[safe: i + 2] ?? "1024") ?? 1024
@@ -38,6 +36,7 @@ enum AppLaunchFlags {
     }
     static var openWindowID: String? { value(after: "--open") }
     static var shootPath: String? { value(after: "--shoot") }
+    static var snapshotPath: String? { value(after: "--snapshot") }
 }
 
 /// Render the largest visible standard window's content to a PNG (real rendering,
@@ -168,6 +167,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var onboardingWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if let snap = AppLaunchFlags.snapshotPath {
+            NSApp.setActivationPolicy(.regular)
+            renderPopover(to: snap)
+            return
+        }
         if let shot = AppLaunchFlags.shootPath {
             NSApp.setActivationPolicy(.regular)
             renderAndShoot(AppLaunchFlags.openWindowID ?? "history", to: shot)
@@ -207,6 +211,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         onboardingWindow = win
         NSApp.activate(ignoringOtherApps: true)
         win.makeKeyAndOrderFront(nil)
+    }
+
+    /// Render the popover (light + dark, side by side) to a PNG via a real NSHostingView +
+    /// cacheDisplay, then quit. The real-view path resolves SF Symbols (the refresh / history
+    /// / gear buttons), which ImageRenderer cannot — it would draw the missing-image
+    /// placeholder for each. Mock data so it shows the full 5-provider lineup + capacity + hint.
+    @MainActor private func renderPopover(to path: String) {
+        func mock() -> AppModel {
+            let m = AppModel(); m.usages = Snapshot.mock; m.lastRefresh = Date(); return m
+        }
+        let root = HStack(alignment: .top, spacing: 16) {
+            MenuContent(model: mock()).environment(\.colorScheme, .light)
+            MenuContent(model: mock()).environment(\.colorScheme, .dark)
+        }
+        .padding(16)
+        .background(Color(white: 0.5))
+
+        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 1000),
+                           styleMask: [.titled], backing: .buffered, defer: false)
+        let host = NSHostingView(rootView: root)
+        win.contentView = host
+        win.makeKeyAndOrderFront(nil)
+        host.layoutSubtreeIfNeeded()
+        win.setContentSize(host.fittingSize)   // shrink-wrap to the rendered content
+        shotWindow = win
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) {
+            guard let view = win.contentView,
+                  let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { exit(1) }
+            view.cacheDisplay(in: view.bounds, to: rep)
+            if let png = rep.representation(using: .png, properties: [:]) {
+                try? png.write(to: URL(fileURLWithPath: path))
+            }
+            exit(0)
+        }
     }
 
     @MainActor private func renderAndShoot(_ id: String, to path: String) {

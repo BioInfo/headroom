@@ -1,71 +1,14 @@
-import SwiftUI
-import AppKit
+import Foundation
 import HeadroomKit
 
-/// Renders the popover to a PNG with representative mock data, light and dark side by
-/// side. Triggered by `--snapshot <path>`; never runs in the shipping menu-bar flow.
+/// Mock data for the dev screenshot paths (`--snapshot` popover, `--open history --shoot`).
+/// The actual rendering is done by `AppDelegate.renderPopover` / `renderAndShoot` through a
+/// real NSHostingView + cacheDisplay — that path resolves SF Symbols, which ImageRenderer
+/// cannot. This file is just the representative data those renders display.
 enum Snapshot {
-    @MainActor
-    static func run(to path: String) {
-        let model = AppModel()
-        model.usages = mock
-        model.lastRefresh = Date()
-
-        let view = VStack(spacing: 16) {
-            iconStrip
-            HStack(alignment: .top, spacing: 16) {
-                MenuContent(model: model).environment(\.colorScheme, .light)
-                MenuContent(model: model).environment(\.colorScheme, .dark)
-            }
-        }
-        .padding(16)
-        .background(Color(white: 0.5))
-
-        let renderer = ImageRenderer(content: view)
-        renderer.scale = 2
-        guard let cg = renderer.cgImage else {
-            FileHandle.standardError.write(Data("snapshot: render failed\n".utf8))
-            exit(1)
-        }
-        let rep = NSBitmapImageRep(cgImage: cg)
-        guard let png = rep.representation(using: .png, properties: [:]) else {
-            FileHandle.standardError.write(Data("snapshot: PNG encode failed\n".utf8))
-            exit(1)
-        }
-        try? png.write(to: URL(fileURLWithPath: path))
-        print("snapshot written: \(path)")
-        exit(0)
-    }
-
-    /// The menu-bar mark at a range of fills, on a light and a dark menu-bar pill, so a
-    /// snapshot shows how the chef-hat gauge fills and warms across the ramp.
-    @ViewBuilder
-    static var iconStrip: some View {
-        let fills: [Double] = [0.08, 0.45, 0.78, 0.92, 1.15]
-        HStack(spacing: 18) {
-            ForEach([ColorScheme.light, .dark], id: \.self) { scheme in
-                HStack(spacing: 10) {
-                    ForEach(fills, id: \.self) { f in
-                        HStack(spacing: 3) {
-                            ChefHatGauge(fraction: f,
-                                         tint: Color(hex: Theme.light.ramp(fraction: f)))
-                                .frame(width: 17, height: 17)
-                            Text("\(Int((min(f,1) * 100).rounded()))%")
-                                .font(.system(size: 11, weight: .semibold).monospacedDigit())
-                                .foregroundStyle(Color(hex: Theme.light.ramp(fraction: f)))
-                        }
-                    }
-                }
-                .padding(.horizontal, 12).padding(.vertical, 5)
-                .background(scheme == .dark ? Color(white: 0.13) : Color(white: 0.93),
-                            in: Capsule())
-            }
-        }
-    }
-
-    /// Synthetic token history for the snapshot (the live path reads ~/.claude logs).
-    /// 120 days with a weekday-weighted, slightly random-looking ramp so the heatmap +
-    /// trend show texture. No Date.now ban here — this is app code, not a workflow script.
+    /// Synthetic token history for the History screenshot (the live path reads ~/.claude logs).
+    /// 120 days with a weekday-weighted, slightly random-looking ramp so the heatmap + trend
+    /// show texture. Deterministic (no Date.now ban here — this is app code, not a workflow).
     static var mockTokens: [TokenDay] {
         let cal = Calendar.current
         let today = cal.startOfDay(for: Date())
