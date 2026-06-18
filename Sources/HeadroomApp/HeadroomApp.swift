@@ -17,6 +17,22 @@ enum Entry {
             MainActor.assumeIsolated { AppIcon.render(to: path, px: px) }
             return
         }
+        // Deterministic check of the composited menu-bar label (two providers + %), so the
+        // multi-hat render can be verified offscreen without watching the live menu bar.
+        if let i = args.firstIndex(of: "--compose-shot") {
+            let path = args[safe: i + 1] ?? "menubar.png"
+            MainActor.assumeIsolated {
+                let items = [AppModel.GlyphItem(id: "claude", fraction: 0.02, meterLabel: "Weekly"),
+                             AppModel.GlyphItem(id: "kimi", fraction: 0.14, meterLabel: nil)]
+                let img = MenuBarGlyph.compose(items: items, showPercent: true, style: .hat, flame: false)
+                if let tiff = img.tiffRepresentation,
+                   let rep = NSBitmapImageRep(data: tiff),
+                   let png = rep.representation(using: .png, properties: [:]) {
+                    try? png.write(to: URL(fileURLWithPath: path))
+                }
+            }
+            return
+        }
         HeadroomApp.main()
     }
 }
@@ -68,7 +84,14 @@ struct HeadroomApp: App {
             MenuContent(model: model)
                 .task { model.start() }
         } label: {
-            MenuBarLabel(model: model)
+            // The entire label is ONE pre-composited NSImage (model.menuBarImage), rebuilt in
+            // AppModel.recomputeMenuBar on every refresh and every glyph-pref change. Read it
+            // in the Scene body so the Scene owns the Observation dependency. A single
+            // Image(nsImage:) swap is the one label shape a MenuBarExtra renders reliably — a
+            // ForEach of multiple hats + Text updated the first item but dropped a 2nd
+            // provider's hat (structural growth not reflected). Compositing avoids that.
+            Image(nsImage: model.menuBarImage)
+                .accessibilityLabel(model.menuBarA11y)
         }
         .menuBarExtraStyle(.window)
 
@@ -80,54 +103,92 @@ struct HeadroomApp: App {
 
         Window("Usage History", id: "history") {
             HistoryView(model: model)
-                .frame(minWidth: 560, minHeight: 420)
+                .frame(minWidth: 560, minHeight: 440)
         }
-        .defaultSize(width: 720, height: 480)
+        .defaultSize(width: 780, height: 600)
+        .windowResizability(.contentMinSize)
 
         // A regular Window, not the `Settings` scene: the `Settings` scene won't surface
         // from an `.accessory` MenuBarExtra app (showSettingsWindow: returns true but opens
         // nothing — verified), so we open this with openWindow like the other windows.
+        // `.contentMinSize` (not `.contentSize`) so the user can resize it freely; the view
+        // sets only a minimum, no fixed lock.
         Window("Settings", id: "settings") {
             SettingsView(model: model)
         }
-        .defaultSize(width: 460, height: 480)
-        .windowResizability(.contentSize)
+        .defaultSize(width: 460, height: 520)
+        .windowResizability(.contentMinSize)
     }
 }
 
-/// Menu bar glyph: the shared chef-hat as a fill gauge — it fills bottom-up and warms
+/// Builders for the menu-bar glyph: the shared chef-hat as a fill gauge that warms
 /// olive→rust as the tightest meter climbs, with the % beside it. One hat, two tools.
 ///
-/// The hat is pre-rendered to an `NSImage` because a `MenuBarExtra` label silently
-/// drops anything beyond Text / SF Symbols (GeometryReader + .mask render to nothing
-/// inline — that's why only the % showed). An image always renders.
-struct MenuBarLabel: View {
-    let model: AppModel
-    var body: some View {
-        // One hat+% per chosen item: a single aggregate hat for tightest/hat-only,
-        // or up to three provider hats side by side for the multi-metric bar.
-        let style = model.prefs.glyphStyle
-        return HStack(spacing: 7) {
-            ForEach(model.glyphItems) { item in
-                HStack(spacing: 3) {
-                    Image(nsImage: Self.glyphImage(for: item.fraction, style: style))
-                    if model.showGlyphPercent, let f = item.fraction {
-                        Text("\(Int((f * 100).rounded()))%")
-                            .font(.system(size: 11, weight: .semibold).monospacedDigit())
-                            .foregroundStyle(Self.tint(for: f))
-                    }
-                }
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel(Self.a11y(item))
+/// The whole label is composited into a SINGLE `NSImage` (flame + each provider's hat +
+/// its %) and handed to the `MenuBarExtra` label as one `Image(nsImage:)`. That is the
+/// only label shape a MenuBarExtra renders reliably: a `ForEach` of multiple hats + `Text`
+/// updated the first item but silently dropped a 2nd provider's hat (structural growth not
+/// reflected), and GeometryReader/.mask render to nothing inline. An image always renders.
+enum MenuBarGlyph {
+    /// Compose the full menu-bar label into one image, laid out left→right like the old
+    /// HStack: optional flame, then per item a hat (+ % when shown). 7pt between items,
+    /// 3pt between a hat and its %.
+    @MainActor static func compose(items: [AppModel.GlyphItem], showPercent: Bool,
+                                   style: GlyphStyle, flame: Bool) -> NSImage {
+        let h: CGFloat = 18, interItem: CGFloat = 7, innerGap: CGFloat = 3
+        var pieces: [(img: NSImage, gap: CGFloat)] = []
+        if flame, let f = flameImage() { pieces.append((f, 0)) }
+        for item in items {
+            let gap: CGFloat = pieces.isEmpty ? 0 : interItem
+            pieces.append((glyphImage(for: item.fraction, style: style), gap))
+            if showPercent, let frac = item.fraction {
+                let t = textImage("\(Int((frac * 100).rounded()))%", color: NSColor(tint(for: frac)))
+                pieces.append((t, innerGap))
             }
         }
-        .accessibilityLabel("Headroom usage")
+        let totalW = pieces.reduce(0) { $0 + $1.gap + $1.img.size.width }
+        let canvas = NSImage(size: NSSize(width: max(1, totalW), height: h))
+        canvas.lockFocus()
+        var x: CGFloat = 0
+        for p in pieces {
+            x += p.gap
+            let y = ((h - p.img.size.height) / 2).rounded()
+            p.img.draw(at: NSPoint(x: x.rounded(), y: y), from: .zero, operation: .sourceOver, fraction: 1)
+            x += p.img.size.width
+        }
+        canvas.unlockFocus()
+        canvas.isTemplate = false   // keep the warm tier colors, don't monochrome it
+        return canvas
     }
 
-    private static func a11y(_ item: AppModel.GlyphItem) -> String {
-        let who = item.id == "_tightest" ? "tightest meter" : Prefs.displayName(item.id)
-        guard let f = item.fraction else { return "Headroom, \(who), no data" }
-        return "Headroom, \(who) \(Int((f * 100).rounded())) percent used"
+    /// VoiceOver label for the composed image: every item read out in order.
+    @MainActor static func a11y(items: [AppModel.GlyphItem]) -> String {
+        guard !items.isEmpty else { return "Headroom usage" }
+        let parts = items.map { item -> String in
+            let base = item.id == "_tightest" ? "tightest meter" : Prefs.displayName(item.id)
+            let who = item.meterLabel.map { "\(base) \($0)" } ?? base
+            guard let f = item.fraction else { return "\(who) no data" }
+            return "\(who) \(Int((f * 100).rounded())) percent used"
+        }
+        return "Headroom: " + parts.joined(separator: ", ")
+    }
+
+    private static func flameImage() -> NSImage? {
+        let cfg = NSImage.SymbolConfiguration(pointSize: 11, weight: .regular)
+            .applying(.init(paletteColors: [NSColor(Color(hex: Theme.light.pressing))]))
+        return NSImage(systemSymbolName: "flame.fill", accessibilityDescription: "Claude peak hours")?
+            .withSymbolConfiguration(cfg)
+    }
+
+    private static func textImage(_ s: String, color: NSColor) -> NSImage {
+        let font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
+        let str = NSAttributedString(string: s, attributes: [.font: font, .foregroundColor: color])
+        let size = str.size()
+        let img = NSImage(size: NSSize(width: ceil(size.width), height: ceil(size.height)))
+        img.lockFocus()
+        str.draw(at: .zero)
+        img.unlockFocus()
+        return img
     }
 
     // Menu-bar items resolve their own light/dark; the warm ramp reads on both.

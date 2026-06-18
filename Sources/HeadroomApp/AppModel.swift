@@ -11,6 +11,31 @@ final class AppModel {
     var isRefreshing = false
     var lastRefresh: Date?
 
+    /// The menu-bar glyph state, held as STORED observable properties and recomputed
+    /// explicitly (`recomputeMenuBar`) whenever usages or the glyph prefs change. The
+    /// `MenuBarExtra` label reads these directly so it has an unambiguous Observation
+    /// dependency — relying on the label tracking a computed property that reaches into a
+    /// second @Observable (`prefs`) was unreliable, so a settings change didn't reflect
+    /// until the next refresh tick or a restart. These do.
+    var menuBarItems: [GlyphItem] = []
+    var menuBarShowsPercent = true
+    var menuBarStyle: GlyphStyle = .hat
+    /// Whether to draw the peak-hours flame in the menu bar right now (opt-in + flame
+    /// sub-toggle + currently inside Claude's busy window). Recomputed with the glyph state.
+    var menuBarFlame = false
+
+    /// The fully-composited menu-bar label as ONE image (flame + every provider's hat + its
+    /// %), recomputed in `recomputeMenuBar`. The `MenuBarExtra` label is just `Image(nsImage:)`
+    /// of this — a single-image swap is the only label shape a MenuBarExtra renders reliably.
+    /// A multi-subview `ForEach` label updated the first hat but silently dropped a 2nd
+    /// provider's hat (structural growth not reflected); compositing sidesteps that entirely.
+    var menuBarImage: NSImage = NSImage()
+    var menuBarA11y: String = "Headroom usage"
+
+    /// Peak hours are active and the user opted in — drives the popover's Claude card
+    /// highlight. Computed live so it's current each time the popover opens.
+    var peakHoursActive: Bool { prefs.showPeakHours && PeakHours.isPeak() }
+
     /// Warm cache of each provider's token-history series (Claude, Codex) so the History
     /// window opens instantly instead of blocking on a local-log parse ("Reading local
     /// logs…"). Precomputed off the main thread on launch and refreshed each cycle; the
@@ -45,6 +70,8 @@ final class AppModel {
     var loginTargetID: String?
 
     let prefs = Prefs.shared
+    /// App self-update (stub until Developer-ID signing + an appcast exist; see Updater).
+    let updater = Updater()
 
     // z.ai keeps a persistent WKWebView for its (optional) browser-login fallback; its
     // primary path is a pasted coding-plan key. Kimi/MiniMax are stateless (key/token paste).
@@ -96,9 +123,18 @@ final class AppModel {
     @ObservationIgnored private let notifier = Notifier()
     @ObservationIgnored private var wakeObserver: NSObjectProtocol?
 
+    init() {
+        // Seed the menu-bar glyph immediately at construction so a hat is visible the moment
+        // the app launches — NOT deferred to start()/the popover's .task. Without this the
+        // stored menuBarItems would be empty until the popover is first opened, and the
+        // menu-bar item renders nothing (looks like the app didn't launch).
+        recomputeMenuBar()
+    }
+
     func start() {
         guard refreshTask == nil else { return }
         notifier.requestAuthorizationIfNeeded()
+        recomputeMenuBar()   // re-seed the glyph state before the first refresh lands
         observeWake()
         warmHistory()   // precompute the History window's data so it opens instantly
         refreshTask = Task { [weak self] in
@@ -174,6 +210,7 @@ final class AppModel {
         current = current.filter { activeIDs.contains($0.key) }
         lastCollected = lastCollected.filter { activeIDs.contains($0.key) }
         usages = active.compactMap { current[$0.id] }
+        recomputeMenuBar()                   // keep the menu-bar glyph synced to fresh usages
         refreshServiceHealth(now)            // check status pages (throttled, off the UI path)
         guard collectedAny else { return }   // an empty tick (nothing due) changes nothing
         lastRefresh = now
@@ -287,37 +324,68 @@ final class AppModel {
                         roomName: room.name, roomFraction: room.frac)
     }
 
-    /// What the single-hat glyph fills/labels to (tightest + hat-only modes). For the
-    /// multi-provider mode this is the hottest of the chosen providers, used as a fallback.
-    var tightestFractionUsed: Double? {
-        switch prefs.glyphSource {
-        case .tightest, .hatOnly:
-            return tightest(in: usages)
-        case .providers(let ids):
-            return tightest(in: usages.filter { ids.contains($0.id) })
+    /// Non-unlimited capped meters for a provider, in report order — the meters a user
+    /// could pin to the menu bar.
+    func pinnableMeters(forProvider id: String) -> [Metric] {
+        usages.first { $0.id == id }?.metrics.filter { !$0.unlimited && $0.fractionUsed != nil } ?? []
+    }
+
+    /// The fraction the menu bar should show for a provider, honoring a pinned meter when
+    /// one is set and present; otherwise the provider's tightest meter. Returns the
+    /// resolved meter's label too (for the VoiceOver string). Distinct from
+    /// `fraction(forProvider:)`, which is always tightest (the "use this next" hint wants
+    /// the worst meter regardless of what's pinned in the menu bar).
+    private func menuBarFraction(forProvider id: String) -> (fraction: Double?, label: String?) {
+        if let pinned = prefs.pinnedMeters[id],
+           let m = pinnableMeters(forProvider: id).first(where: { $0.label == pinned }) {
+            return (m.fractionUsed, m.label)
         }
+        return (fraction(forProvider: id), nil)   // tightest; label nil = "tightest meter"
     }
 
     /// One entry per hat the menu bar should draw, in the user's chosen order. A single
-    /// entry for tightest/hat-only; up to three for the multi-provider bar. `id` is nil
-    /// for the aggregate "tightest" hat (no specific provider).
-    struct GlyphItem: Identifiable { let id: String; let fraction: Double? }
-    var glyphItems: [GlyphItem] {
+    /// entry for tightest/hat-only; up to three for the multi-provider bar. `id` is
+    /// "_tightest" for the aggregate hat (no specific provider). `meterLabel` is the
+    /// pinned meter's name when one resolved, else nil (tightest).
+    struct GlyphItem: Identifiable { let id: String; let fraction: Double?; var meterLabel: String? = nil }
+
+    /// Build the menu-bar items for the current glyph source. The source of truth that
+    /// `recomputeMenuBar` snapshots into the stored `menuBarItems`.
+    private func computeGlyphItems() -> [GlyphItem] {
         switch prefs.glyphSource {
         case .tightest, .hatOnly:
             return [GlyphItem(id: "_tightest", fraction: tightest(in: usages))]
         case .providers(let ids):
             let live = ids.filter { prefs.isEnabled($0) }
             let pick = live.isEmpty ? ids : live   // if none enabled, still show what was chosen
-            return pick.prefix(GlyphSource.maxProviders).map {
-                GlyphItem(id: $0, fraction: fraction(forProvider: $0))
+            return pick.prefix(GlyphSource.maxProviders).map { id in
+                let r = menuBarFraction(forProvider: id)
+                return GlyphItem(id: id, fraction: r.fraction, meterLabel: r.label)
             }
         }
     }
 
-    /// Whether to show the % text beside the hat (hidden in hat-only mode).
-    var showGlyphPercent: Bool {
-        if case .hatOnly = prefs.glyphSource { return false }
-        return true
+    /// Snapshot the glyph prefs + current usages into the stored menu-bar state. Called on
+    /// every refresh (after `usages` updates) and from each glyph-pref setter, so a Settings
+    /// change reflects in the menu bar immediately — no refresh tick, no restart.
+    func recomputeMenuBar() {
+        menuBarItems = computeGlyphItems()
+        menuBarStyle = prefs.glyphStyle
+        if case .hatOnly = prefs.glyphSource { menuBarShowsPercent = false } else { menuBarShowsPercent = true }
+        menuBarFlame = prefs.showPeakHours && prefs.peakHoursFlame && PeakHours.isPeak()
+        // Composite the whole label into one image so the MenuBarExtra reliably swaps it.
+        menuBarImage = MenuBarGlyph.compose(items: menuBarItems, showPercent: menuBarShowsPercent,
+                                            style: menuBarStyle, flame: menuBarFlame)
+        menuBarA11y = MenuBarGlyph.a11y(items: menuBarItems)
+    }
+
+    // MARK: glyph-pref setters (route through here so the menu bar recomputes live)
+
+    func setGlyphSource(_ source: GlyphSource) { prefs.glyphSource = source; recomputeMenuBar() }
+    func setGlyphStyle(_ style: GlyphStyle)    { prefs.glyphStyle = style; recomputeMenuBar() }
+    /// Pin a provider's menu-bar meter to `label`, or nil to clear (back to tightest).
+    func setPinnedMeter(_ id: String, label: String?) {
+        if let label { prefs.pinnedMeters[id] = label } else { prefs.pinnedMeters[id] = nil }
+        recomputeMenuBar()
     }
 }

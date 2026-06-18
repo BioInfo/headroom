@@ -7,6 +7,11 @@ enum HeadroomLinks {
     static let family = URL(string: "https://github.com/BioInfo/claudelicious")!
     /// "Request a provider" → a prefilled GitHub issue (the community channel for new tools).
     static let requestProvider = URL(string: "https://github.com/BioInfo/headroom/issues/new?template=provider-request.yml")!
+    /// Contribute / report → the repo's issues.
+    static let contribute = URL(string: "https://github.com/BioInfo/headroom/issues")!
+    /// GitHub Sponsors (valid once Sponsors is enabled on the account).
+    static let sponsor = URL(string: "https://github.com/sponsors/BioInfo")!
+    static let buyMeACoffee = URL(string: "https://buymeacoffee.com/JustinHJohnson")!
 }
 
 /// Headroom preferences — Providers, Appearance, General, About. Reads/writes `Prefs`
@@ -19,13 +24,14 @@ struct SettingsView: View {
     @State private var tab: Tab = .providers
 
     enum Tab: String, CaseIterable, Identifiable {
-        case providers, appearance, general, about
+        case providers, appearance, general, updates, about
         var id: String { rawValue }
         var title: String {
             switch self {
             case .providers: "Providers"
             case .appearance: "Appearance"
             case .general: "General"
+            case .updates: "Updates"
             case .about: "About"
             }
         }
@@ -34,6 +40,7 @@ struct SettingsView: View {
             case .providers: "square.stack.3d.up"
             case .appearance: "paintpalette"
             case .general: "gearshape"
+            case .updates: "arrow.down.circle"
             case .about: "info.circle"
             }
         }
@@ -73,14 +80,15 @@ struct SettingsView: View {
             Group {
                 switch tab {
                 case .providers:  ProvidersTab(model: model, skin: skin, openLogin: openLogin)
-                case .appearance: AppearanceTab(prefs: model.prefs, skin: skin)
+                case .appearance: AppearanceTab(model: model, skin: skin)
                 case .general:    GeneralTab(prefs: model.prefs, skin: skin)
+                case .updates:    UpdatesTab(updater: model.updater, prefs: model.prefs, skin: skin)
                 case .about:      AboutTab(skin: skin)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(width: 460, height: 480)
+        .frame(minWidth: 440, minHeight: 460)
         .background(skin.bg)
     }
 
@@ -199,8 +207,9 @@ private struct ProviderRow: View {
 // MARK: - Appearance
 
 private struct AppearanceTab: View {
-    @Bindable var prefs: Prefs
+    @Bindable var model: AppModel
     let skin: Skin
+    private var prefs: Prefs { model.prefs }
 
     private enum Mode: String, Hashable { case tightest, providers, hatOnly }
 
@@ -213,12 +222,12 @@ private struct AppearanceTab: View {
     }
     private func setMode(_ m: Mode) {
         switch m {
-        case .tightest: prefs.glyphSource = .tightest
-        case .hatOnly:  prefs.glyphSource = .hatOnly
+        case .tightest: model.setGlyphSource(.tightest)
+        case .hatOnly:  model.setGlyphSource(.hatOnly)
         case .providers:
             let cur = chosenProviders
             let seed = cur.isEmpty ? Array(Prefs.allProviderIDs.filter { prefs.isEnabled($0) }.prefix(1)) : cur
-            prefs.glyphSource = seed.isEmpty ? .tightest : .providers(seed)
+            model.setGlyphSource(seed.isEmpty ? .tightest : .providers(seed))
         }
     }
     private var chosenProviders: [String] {
@@ -229,7 +238,13 @@ private struct AppearanceTab: View {
         var ids = chosenProviders
         if let i = ids.firstIndex(of: id) { ids.remove(at: i) }
         else if ids.count < GlyphSource.maxProviders { ids.append(id) }
-        prefs.glyphSource = ids.isEmpty ? .tightest : .providers(ids)
+        model.setGlyphSource(ids.isEmpty ? .tightest : .providers(ids))
+    }
+
+    /// Which meter a chosen provider shows in the menu bar: nil = tightest, else a label.
+    private func pinBinding(_ id: String) -> Binding<String?> {
+        Binding(get: { prefs.pinnedMeters[id] },
+                set: { model.setPinnedMeter(id, label: $0) })
     }
 
     var body: some View {
@@ -248,8 +263,20 @@ private struct AppearanceTab: View {
                             set: { _ in toggleProvider(id) }))
                         .toggleStyle(.checkbox)
                         .disabled(!chosen.contains(id) && chosen.count >= GlyphSource.maxProviders)
+                        // When a provider with more than one meter is picked, let the user
+                        // pin which % shows (e.g. Claude → Weekly), not just the tightest.
+                        if chosen.contains(id) {
+                            let meters = model.pinnableMeters(forProvider: id)
+                            if meters.count > 1 {
+                                Picker("Meter", selection: pinBinding(id)) {
+                                    Text("Tightest").tag(String?.none)
+                                    ForEach(meters) { Text($0.label).tag(Optional($0.label)) }
+                                }
+                                .padding(.leading, 18)
+                            }
+                        }
                     }
-                    Text("Each shows its own hat + % in the menu bar, in this order. Enable a provider in the Providers tab to pick it here.")
+                    Text("Each shows its own hat + % in the menu bar, in this order. Pick which meter a multi-meter provider shows, or leave it on its tightest. Enable a provider in the Providers tab to choose it here.")
                         .font(.caption).foregroundStyle(skin.faint)
                 } else {
                     Text("The glyph fills and warms with whichever meter you pick.")
@@ -257,14 +284,17 @@ private struct AppearanceTab: View {
                 }
             }
             Section {
-                Picker("Glyph style", selection: $prefs.glyphStyle) {
+                Picker("Glyph style", selection: Binding(
+                    get: { prefs.glyphStyle }, set: { model.setGlyphStyle($0) })) {
                     ForEach(GlyphStyle.allCases) { Text($0.title).tag($0) }
                 }
                 Text("The chef-hat is the family mark. Bar is a flat meter; Battery drains as you spend (reads as charge left).")
                     .font(.caption).foregroundStyle(skin.faint)
             }
             Section {
-                Toggle("Show Claude “Extra usage” row", isOn: $prefs.showClaudeExtraUsage)
+                Toggle("Show Claude “Extra usage” row", isOn: Binding(
+                    get: { prefs.showClaudeExtraUsage },
+                    set: { prefs.showClaudeExtraUsage = $0 }))
                 Text("Off by default. It's a pay-as-you-go $ pool, not subscription headroom, so it never drives the menu-bar glyph.")
                     .font(.caption).foregroundStyle(skin.faint)
             }
@@ -298,6 +328,15 @@ private struct GeneralTab: View {
             Section {
                 Toggle("Check provider status pages", isOn: $prefs.checkProviderStatus)
                 Text("Shows a “Down/Degraded” badge from Anthropic & OpenAI's public status pages, so a flat meter during an outage reads as their problem, not yours. Read-only, no data sent.")
+                    .font(.caption).foregroundStyle(skin.faint)
+            }
+            Section {
+                Toggle("Show peak hours indicator", isOn: $prefs.showPeakHours)
+                if prefs.showPeakHours {
+                    Toggle("Show flame in menu bar", isOn: $prefs.peakHoursFlame)
+                        .padding(.leading, 18)
+                }
+                Text("Warms the Claude card (and adds a flame) during its busy window — \(PeakHours.windowLabel). The window is an inferred heuristic, not a published Anthropic cap, so it's off by default.")
                     .font(.caption).foregroundStyle(skin.faint)
             }
             Section {
@@ -341,26 +380,135 @@ private struct GeneralTab: View {
     }
 }
 
+// MARK: - Updates (Software Updates — built now, real engine wired once signed)
+
+private struct UpdatesTab: View {
+    @Bindable var updater: Updater
+    @Bindable var prefs: Prefs
+    let skin: Skin
+
+    private func infoRow(_ label: String, _ value: String, _ icon: String) -> some View {
+        HStack {
+            Label(label, systemImage: icon).foregroundStyle(skin.ink2)
+            Spacer()
+            Text(value).foregroundStyle(skin.ink).monospacedDigit()
+        }
+    }
+
+    var body: some View {
+        Form {
+            Section("Version") {
+                infoRow("Current version", AppInfo.versionLabel, "shippingbox")
+                infoRow("Last checked",
+                        updater.lastChecked.map { $0.formatted(.relative(presentation: .named)) } ?? "Never",
+                        "clock")
+            }
+            Section {
+                Toggle("Automatic updates", isOn: $prefs.autoUpdate)
+                Text("Check for and download updates in the background. Turns on once Headroom is Developer-ID signed — see docs/APPLE-DEVELOPER-SETUP.md.")
+                    .font(.caption).foregroundStyle(skin.faint)
+            }
+            Section {
+                Button { updater.checkForUpdates() } label: {
+                    Label("Check for Updates", systemImage: "arrow.down.circle")
+                        .frame(maxWidth: .infinity)
+                }
+                .controlSize(.large).buttonStyle(.borderedProminent).tint(skin.clay)
+                if let msg = updater.statusMessage {
+                    Text(msg).font(.caption).foregroundStyle(skin.ink2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Section {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "checkmark.shield.fill").foregroundStyle(skin.ramp(.healthy))
+                    Text("Updates are cryptographically signed and verified before they install.")
+                        .font(.caption).foregroundStyle(skin.ink2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
+        .background(skin.bg)
+    }
+}
+
 // MARK: - About
 
 private struct AboutTab: View {
     let skin: Skin
-    var body: some View {
-        VStack(spacing: 12) {
-            ChefHat().fill(skin.clay).frame(width: 54, height: 54)
-            Text("Headroom").font(.title2.weight(.semibold)).foregroundStyle(skin.ink)
-            Text("How much of every AI coding subscription you've got left, in one place.")
-                .font(.callout).foregroundStyle(skin.ink2)
-                .multilineTextAlignment(.center).frame(maxWidth: 320)
-            Link("Part of the Claudelicious family ↗", destination: HeadroomLinks.family)
-                .font(.callout).tint(skin.clay)
-            Link("Request a provider →", destination: HeadroomLinks.requestProvider)
-                .font(.caption).tint(skin.clay)
-            Text("MIT licensed · made with the cookbook")
-                .font(.caption2).foregroundStyle(skin.faint)
+
+    private func point(_ icon: String, _ tint: Color, _ title: String, _ body: String) -> some View {
+        HStack(alignment: .top, spacing: 9) {
+            Image(systemName: icon).font(.body).foregroundStyle(tint).frame(width: 18)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title).font(.caption.weight(.semibold)).foregroundStyle(skin.ink)
+                Text(body).font(.caption2).foregroundStyle(skin.ink2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding(24)
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 14) {
+                ChefHat().fill(skin.clay).frame(width: 50, height: 50)
+                Text("Headroom").font(.title2.weight(.semibold)).foregroundStyle(skin.ink)
+                Text("How much of every AI coding subscription you've got left, in one place.")
+                    .font(.callout).foregroundStyle(skin.ink2)
+                    .multilineTextAlignment(.center).frame(maxWidth: 320)
+
+                // What you're getting — free, open, private.
+                VStack(alignment: .leading, spacing: 10) {
+                    point("checkmark.seal.fill", skin.ramp(.healthy), "Every feature is free",
+                          "No premium tier, no paywall, no subscription.")
+                    point("lock.open.fill", skin.clay, "Open source",
+                          "MIT licensed. Read it, change it, send a pull request.")
+                    point("hand.raised.fill", skin.ramp(.pressing), "No tracking",
+                          "No analytics, no telemetry. Everything stays on your Mac.")
+                }
+                .padding(13).frame(maxWidth: .infinity, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 10).fill(skin.card))
+                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(skin.edge, lineWidth: 1))
+
+                Text("If Headroom is useful, you can help keep it going.")
+                    .font(.caption).foregroundStyle(skin.ink2)
+
+                // The Buy Me a Coffee mark keeps its recognizable yellow on the cream ground.
+                Link(destination: HeadroomLinks.buyMeACoffee) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "cup.and.saucer.fill")
+                        Text("Buy Me a Coffee").fontWeight(.semibold)
+                    }
+                    .foregroundStyle(Color(hex: "2A2520"))
+                    .padding(.horizontal, 18).padding(.vertical, 9)
+                    .background(Color(hex: "FFDD00"), in: Capsule())
+                }
+                .buttonStyle(.plain)
+
+                HStack(spacing: 16) {
+                    Link(destination: HeadroomLinks.sponsor) {
+                        Label("Sponsor", systemImage: "heart.fill")
+                    }.tint(skin.ramp(.critical))
+                    Link(destination: HeadroomLinks.repo) {
+                        Label("Star on GitHub", systemImage: "star.fill")
+                    }.tint(skin.clay)
+                    Link(destination: HeadroomLinks.contribute) {
+                        Label("Contribute", systemImage: "chevron.left.forwardslash.chevron.right")
+                    }.tint(skin.clay)
+                }
+                .font(.caption.weight(.medium))
+
+                Link("Part of the Claudelicious family ↗", destination: HeadroomLinks.family)
+                    .font(.caption).tint(skin.clay)
+                Text("MIT licensed · made with the cookbook")
+                    .font(.caption2).foregroundStyle(skin.faint)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(24)
+        }
         .background(skin.bg)
     }
 }

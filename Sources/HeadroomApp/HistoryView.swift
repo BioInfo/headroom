@@ -34,7 +34,7 @@ struct HistoryView: View {
                     trend(skin)
                     heatmap(skin)
                 }
-                sparklines(skin)
+                utilizationPanel(skin)
             }
             .padding(18)
         }
@@ -261,30 +261,73 @@ struct HistoryView: View {
         }
     }
 
-    // MARK: per-provider utilization sparklines (self-recorded)
+    // MARK: cross-provider utilization (self-recorded peak % used per day)
 
-    private func sparklines(_ skin: Skin) -> some View {
+    /// One point: a provider's recorded peak utilization on a given day, as a percent.
+    private struct UtilPoint: Identifiable {
+        let day: Date; let provider: String; let pct: Double
+        var id: String { "\(provider)-\(day.timeIntervalSince1970)" }
+    }
+
+    /// All providers' utilization overlaid on one chart, with a real % axis, dated X axis,
+    /// per-provider color, and a legend that names each provider's latest recorded value.
+    /// This is the cross-provider read only a multi-provider tool gives — "who's been hot
+    /// lately" — readable instead of five flat, axis-less sparklines.
+    private func utilizationPanel(_ skin: Skin) -> some View {
         let series = UsageHistory.shared.utilizationSeries(days: 30)
         let providers = Array(Set(series.flatMap { $0.fractions.keys })).sorted()
-        return VStack(alignment: .leading, spacing: 8) {
-            Text("Recorded utilization (last 30 days)").font(.subheadline.weight(.semibold)).foregroundStyle(skin.ink2)
-            if providers.isEmpty {
-                Text("Headroom records peak utilization per day as it runs. Check back tomorrow.")
+        let points: [UtilPoint] = series.flatMap { d in
+            d.fractions.map { UtilPoint(day: d.day, provider: $0.key, pct: $0.value * 100) }
+        }
+        let names = providers.map { Prefs.displayName($0) }
+        let colors = providers.map { ProviderInfo.tierColor($0, skin) }
+        func latest(_ id: String) -> Double? {
+            series.last(where: { $0.fractions[id] != nil })?.fractions[id]
+        }
+        return VStack(alignment: .leading, spacing: 10) {
+            Text("Utilization — % used per day").font(.subheadline.weight(.semibold)).foregroundStyle(skin.ink2)
+            if points.isEmpty {
+                Text("Headroom records each provider's peak utilization per day as it runs. Check back tomorrow.")
                     .font(.caption).foregroundStyle(skin.faint)
             } else {
-                ForEach(providers, id: \.self) { id in
-                    HStack(spacing: 10) {
-                        Text(Prefs.displayName(id)).font(.caption).foregroundStyle(skin.ink2)
-                            .frame(width: 90, alignment: .leading)
-                        Chart(series, id: \.day) { d in
-                            if let f = d.fractions[id] {
-                                LineMark(x: .value("Day", d.day), y: .value("Used", f * 100))
-                                    .foregroundStyle(skin.ramp(.warming)).interpolationMethod(.monotone)
+                Chart(points) { p in
+                    LineMark(x: .value("Day", p.day), y: .value("Used", p.pct))
+                        .foregroundStyle(by: .value("Provider", Prefs.displayName(p.provider)))
+                        .interpolationMethod(.monotone)
+                        .lineStyle(StrokeStyle(lineWidth: 2))
+                }
+                .chartForegroundStyleScale(domain: names, range: colors)
+                .chartYScale(domain: 0...100)
+                .chartYAxis {
+                    AxisMarks(values: [0.0, 25, 50, 75, 100]) { v in
+                        AxisGridLine().foregroundStyle(skin.edge.opacity(0.5))
+                        AxisValueLabel {
+                            if let d = v.as(Double.self) {
+                                Text("\(Int(d))%").font(.caption2).foregroundStyle(skin.faint)
                             }
                         }
-                        .chartYScale(domain: 0...100).chartXAxis(.hidden).chartYAxis(.hidden)
-                        .frame(height: 28)
                     }
+                }
+                .chartXAxis {
+                    AxisMarks(values: .stride(by: .day, count: 7)) { _ in
+                        AxisGridLine().foregroundStyle(skin.edge.opacity(0.4))
+                        AxisValueLabel(format: .dateTime.month(.abbreviated).day())
+                    }
+                }
+                .chartLegend(.hidden)   // custom legend below carries the latest value
+                .frame(height: 180)
+                HStack(spacing: 16) {
+                    ForEach(providers, id: \.self) { id in
+                        HStack(spacing: 5) {
+                            Circle().fill(ProviderInfo.tierColor(id, skin)).frame(width: 8, height: 8)
+                            Text(Prefs.displayName(id)).font(.caption).foregroundStyle(skin.ink2)
+                            if let l = latest(id) {
+                                Text("\(Int((l*100).rounded()))%")
+                                    .font(.caption.monospacedDigit().weight(.semibold)).foregroundStyle(skin.ink)
+                            }
+                        }
+                    }
+                    Spacer(minLength: 0)
                 }
             }
         }

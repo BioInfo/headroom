@@ -77,8 +77,21 @@ final class Prefs {
     var refreshOnWake: Bool           { didSet { d.set(refreshOnWake, forKey: "refreshOnWake") } }
     var glyphSource: GlyphSource      { didSet { d.set(glyphSource.stored, forKey: "glyphSource") } }
     var glyphStyle: GlyphStyle        { didSet { d.set(glyphStyle.rawValue, forKey: "glyphStyle") } }
+    /// Per-provider pinned meter: provider id → the meter label to track in the menu bar
+    /// (e.g. "claude" → "Weekly"). Absent = use that provider's tightest meter. Self-heals:
+    /// if a pinned label disappears, the lookup misses and falls back to tightest.
+    var pinnedMeters: [String: String] { didSet { d.set(pinnedMeters, forKey: "pinnedMeters") } }
     var checkProviderStatus: Bool     { didSet { d.set(checkProviderStatus, forKey: "checkProviderStatus") } }
     var hasOnboarded: Bool            { didSet { d.set(hasOnboarded, forKey: "hasOnboarded") } }
+    /// Peak-hours indicator (Claude's busy weekday window — see `PeakHours`). Opt-in
+    /// because the window is an inferred heuristic, not a published cap.
+    var showPeakHours: Bool           { didSet { d.set(showPeakHours, forKey: "showPeakHours") } }
+    /// When peak hours are shown, also put a flame in the menu bar (vs. only highlighting
+    /// the card in the popover).
+    var peakHoursFlame: Bool          { didSet { d.set(peakHoursFlame, forKey: "peakHoursFlame") } }
+    /// Auto-check for app updates (Software Updates tab). Wired to a real updater once the
+    /// app is Developer-ID signed + an appcast is hosted; a no-op until then.
+    var autoUpdate: Bool              { didSet { d.set(autoUpdate, forKey: "autoUpdate") } }
 
     private init() {
         let saved = d.array(forKey: "enabledProviders") as? [String]
@@ -92,8 +105,12 @@ final class Prefs {
         refreshOnWake = (d.object(forKey: "refreshOnWake") as? Bool) ?? true
         glyphSource = GlyphSource(stored: d.string(forKey: "glyphSource") ?? "tightest")
         glyphStyle = GlyphStyle(rawValue: d.string(forKey: "glyphStyle") ?? "") ?? .hat
+        pinnedMeters = (d.dictionary(forKey: "pinnedMeters") as? [String: String]) ?? [:]
         checkProviderStatus = (d.object(forKey: "checkProviderStatus") as? Bool) ?? true
         hasOnboarded = d.bool(forKey: "hasOnboarded")   // default false → show onboarding once
+        showPeakHours = d.bool(forKey: "showPeakHours")                       // default false (opt-in)
+        peakHoursFlame = (d.object(forKey: "peakHoursFlame") as? Bool) ?? true
+        autoUpdate = (d.object(forKey: "autoUpdate") as? Bool) ?? true
     }
 
     func isEnabled(_ id: String) -> Bool { enabledProviders.contains(id) }

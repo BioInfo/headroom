@@ -1,0 +1,21 @@
+{
+  "sourceLanguage" : "en",
+  "version" : "1.0",
+  "strings" : {
+    "Headroom" : {
+      "comment" : "App name; usually left untranslated."
+    },
+    "Settings" : {
+      "comment" : "Settings window title and tab."
+    },
+    "Usage History" : {
+      "comment" : "History window title."
+    },
+    "Check for Updates" : {
+      "comment" : "Button in the Updates tab."
+    },
+    "Quit" : {
+      "comment" : "Quit button in the popover footer."
+    }
+  }
+}

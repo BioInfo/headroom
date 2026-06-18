@@ -88,6 +88,7 @@ struct MenuContent: View {
                              refreshing: model.isRefreshing,
                              canWebLogin: model.loginWebView(for: usage.provider) != nil,
                              canKey: model.keyService(for: usage.provider) != nil,
+                             peak: model.peakHoursActive && usage.provider == "claude",
                              onLogin: {
                     model.loginTargetID = usage.provider
                     surface("login")
@@ -182,6 +183,9 @@ struct ProviderCard: View {
     var refreshing: Bool = false
     var canWebLogin: Bool = false
     var canKey: Bool = false
+    /// Claude's peak-hours window is active (and the user opted in) — warm the card so it
+    /// reads as "busier than usual right now," matching the menu-bar flame.
+    var peak: Bool = false
     var onLogin: () -> Void
     var onSettings: () -> Void = {}
 
@@ -202,6 +206,12 @@ struct ProviderCard: View {
                     .font(.caption2.weight(.bold)).foregroundStyle(skin.bg2)
                     .padding(.horizontal, 5).padding(.vertical, 1.5)
                     .background(skin.clay, in: Capsule())
+            }
+            if peak {
+                Image(systemName: "flame.fill")
+                    .font(.caption2).foregroundStyle(skin.ramp(.pressing))
+                    .help("Peak hours · \(PeakHours.windowLabel)")
+                    .accessibilityLabel("Peak hours")
             }
             Spacer()
             if let health, health.isNotable {
@@ -252,10 +262,12 @@ struct ProviderCard: View {
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: 9, style: .continuous).fill(skin.card)
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(peak ? skin.ramp(.warming).opacity(0.07) : skin.card)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(skin.edge, lineWidth: 1)
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .strokeBorder(peak ? skin.ramp(.pressing).opacity(0.45) : skin.edge, lineWidth: 1)
         )
         .shadow(color: .black.opacity(0.05), radius: 1.5, y: 1)
     }
@@ -409,20 +421,22 @@ struct GaugeRow: View {
     }
 }
 
-/// Ten-segment meter on the warm ramp. Lit segments climb olive→amber→terracotta→rust
-/// by their own position, so the bar shows how hot you are, not just how far. Over-cap
-/// (severity > 1) paints the whole bar aubergine. The optional pace tick marks the
-/// even-burn line: fill to the right of it = ahead of pace, on track to run out early.
+/// Twenty-segment meter on the warm ramp. Lit segments climb olive→amber→terracotta→rust
+/// by their own position, so the bar shows how hot you are, not just how far. Twenty
+/// segments (was ten) so the last stretch reads true — 90% used now leaves two clear
+/// empty segments instead of lighting the whole bar. Over-cap (severity > 1) paints the
+/// whole bar aubergine. The optional pace tick marks the even-burn line: fill to the
+/// right of it = ahead of pace, on track to run out early.
 struct SegmentedGauge: View {
     let fraction: Double   // 0...1, clamped — how many segments light
     let severity: Double   // unclamped — drives over-cap runaway color
     let skin: Skin
     var paceElapsed: Double? = nil  // 0...1 even-burn position for the pace tick
-    var segments = 10
+    var segments = 20
 
     var body: some View {
         ZStack(alignment: .leading) {
-            HStack(spacing: 3) {
+            HStack(spacing: 2) {
                 ForEach(0..<segments, id: \.self) { i in
                     RoundedRectangle(cornerRadius: 2, style: .continuous)
                         .fill(color(i))

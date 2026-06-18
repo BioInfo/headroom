@@ -3,6 +3,10 @@ import PackageDescription
 
 let package = Package(
     name: "Headroom",
+    // Localization base. The String Catalog (Sources/HeadroomApp/Resources/Localizable.xcstrings)
+    // makes the UI translation-ready; the top-10 translations are the documented fast-follow
+    // (see docs/I18N.md).
+    defaultLocalization: "en",
     platforms: [.macOS(.v14)],
     products: [
         .library(name: "HeadroomKit", targets: ["HeadroomKit"]),
@@ -17,7 +21,8 @@ let package = Package(
         ),
         .executableTarget(
             name: "HeadroomApp",
-            dependencies: ["HeadroomKit"]
+            dependencies: ["HeadroomKit"],
+            resources: [.process("Resources")]
         ),
         .testTarget(
             name: "HeadroomKitTests",
