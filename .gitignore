@@ -17,5 +17,6 @@ DerivedData/
 # macOS
 .DS_Store
 
-# built app bundle (artifact)
+# built app bundle + release archives (artifacts; the .zip ships as a GitHub release asset)
 Headroom.app/
+Headroom-*.zip

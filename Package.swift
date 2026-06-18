@@ -13,6 +13,11 @@ let package = Package(
         .executable(name: "headroom", targets: ["headroom"]),
         .executable(name: "HeadroomApp", targets: ["HeadroomApp"]),
     ],
+    dependencies: [
+        // Sparkle drives the auto-update feed (Developer-ID signed + notarized builds only).
+        // Permissive license, clean for MIT. See docs/APPLE-DEVELOPER-SETUP.md.
+        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.9.3"),
+    ],
     targets: [
         .target(name: "HeadroomKit"),
         .executableTarget(
@@ -21,7 +26,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "HeadroomApp",
-            dependencies: ["HeadroomKit"],
+            dependencies: ["HeadroomKit", .product(name: "Sparkle", package: "Sparkle")],
             resources: [.process("Resources")]
         ),
         .testTarget(

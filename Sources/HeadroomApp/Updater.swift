@@ -1,26 +1,60 @@
 import Foundation
 import Observation
+import Sparkle
 
-/// App self-update, abstracted so the Updates UI ships now and the real engine (Sparkle)
-/// drops in once the app is Developer-ID signed + an appcast feed is hosted. Until then
-/// this is honest: it records the check time and says auto-update isn't wired yet, rather
-/// than faking an "up to date" result. Swapping in Sparkle is a body change here, not an
-/// API change for the views. See docs/APPLE-DEVELOPER-SETUP.md.
+/// App self-update, backed by Sparkle. The Updates UI talks to this; the engine reads the
+/// appcast feed configured in Info.plist (SUFeedURL + SUPublicEDKey, set by build-app.sh on
+/// signed builds). Each update is EdDSA-signed by our private key and verified against the
+/// embedded public key before it installs — separate from the Apple Developer ID that signs
+/// the app itself. See docs/APPLE-DEVELOPER-SETUP.md.
+///
+/// Dormant in unbundled dev runs (`swift run`, `--snapshot`, `--shoot`): those have no
+/// Info.plist, so there's no feed URL and we don't start Sparkle (which would otherwise
+/// surface a "can't find the feed" error). `isLive` reflects that.
 @MainActor
 @Observable
 final class Updater {
-    /// True once a real backend (Sparkle) is wired behind a signed + notarized build.
-    let isLive = false
+    /// True when Sparkle has a feed to talk to — i.e. a bundled build whose Info.plist carries
+    /// SUFeedURL. False in unbundled dev runs, where we stay quiet instead of erroring.
+    let isLive: Bool
     var lastChecked: Date?
     /// Short human status from the last check, shown under the button.
     var statusMessage: String?
 
+    @ObservationIgnored private let controller: SPUStandardUpdaterController?
+
+    init() {
+        let feed = Bundle.main.infoDictionary?["SUFeedURL"] as? String
+        if let feed, !feed.isEmpty {
+            // startingUpdater:true reads SUFeedURL/SUPublicEDKey/SUEnableAutomaticChecks from
+            // Info.plist and begins the background schedule immediately.
+            controller = SPUStandardUpdaterController(
+                startingUpdater: true,
+                updaterDelegate: nil,
+                userDriverDelegate: nil
+            )
+            isLive = true
+        } else {
+            controller = nil
+            isLive = false
+        }
+    }
+
+    /// Whether Sparkle checks on its own schedule. Mirrors `Prefs.autoUpdate`, which stays the
+    /// source of truth; AppModel/Settings push the pref into here.
+    var automaticallyChecksForUpdates: Bool {
+        get { controller?.updater.automaticallyChecksForUpdates ?? false }
+        set { controller?.updater.automaticallyChecksForUpdates = newValue }
+    }
+
     func checkForUpdates() {
         lastChecked = Date()
-        statusMessage = isLive
-            ? "You're on the latest version."
-            : "Auto-update turns on once Headroom is signed and notarized. For now, update by pulling the repo and rebuilding."
-        // When Sparkle is wired: call its updater here, guarded by `isLive`.
+        guard let controller else {
+            statusMessage = "Auto-update runs in the installed app. This is an unsigned dev build — update by pulling the repo and rebuilding."
+            return
+        }
+        controller.updater.checkForUpdates()
+        statusMessage = "Checking for updates…"
     }
 }
 

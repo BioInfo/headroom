@@ -134,6 +134,7 @@ final class AppModel {
     func start() {
         guard refreshTask == nil else { return }
         notifier.requestAuthorizationIfNeeded()
+        updater.automaticallyChecksForUpdates = prefs.autoUpdate   // Sparkle's schedule mirrors the pref
         recomputeMenuBar()   // re-seed the glyph state before the first refresh lands
         observeWake()
         warmHistory()   // precompute the History window's data so it opens instantly

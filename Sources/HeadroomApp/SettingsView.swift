@@ -405,7 +405,10 @@ private struct UpdatesTab: View {
             }
             Section {
                 Toggle("Automatic updates", isOn: $prefs.autoUpdate)
-                Text("Check for and download updates in the background. Turns on once Headroom is Developer-ID signed — see docs/APPLE-DEVELOPER-SETUP.md.")
+                    .onChange(of: prefs.autoUpdate) { _, on in updater.automaticallyChecksForUpdates = on }
+                Text(updater.isLive
+                     ? "Check for and download updates in the background. Updates are EdDSA-signed and verified before they install."
+                     : "Auto-update runs in the installed, signed app. This dev build updates by pulling the repo and rebuilding.")
                     .font(.caption).foregroundStyle(skin.faint)
             }
             Section {

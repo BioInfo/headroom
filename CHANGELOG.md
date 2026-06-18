@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-06-18
+
+### Added
+- Automatic updates via Sparkle. Signed, notarized builds check a GitHub-hosted appcast and install EdDSA-verified updates in the background; toggle in Settings → Updates.
+- Developer ID signing + Apple notarization in `build-app.sh` (`NOTARIZE=1`), so downloaded builds open with no Gatekeeper warning. Builds without a Developer ID identity fall back to ad-hoc signing as before.
+
 ## [1.1.0] - 2026-06-18
 
 ### Added
@@ -33,6 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Local-creds collectors (Claude, Codex) and web-dashboard collectors (z.ai, Kimi, MiniMax) via a hidden per-provider `WKWebView` session.
 - `headroom` CLI (`usage --json`, `doctor`) and the `Headroom.app` SwiftUI `MenuBarExtra`.
 
-[Unreleased]: https://github.com/BioInfo/headroom/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/BioInfo/headroom/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/BioInfo/headroom/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/BioInfo/headroom/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/BioInfo/headroom/releases/tag/v1.0.0
