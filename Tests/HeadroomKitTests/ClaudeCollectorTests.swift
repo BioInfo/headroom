@@ -56,3 +56,70 @@ private let claudeUsageJSON = #"""
     #expect(d != nil)
     #expect(ClaudeCollector.parseISO(nil) == nil)
 }
+
+// MARK: - credential freshness (the logout/login stale-file-vs-live-Keychain bug)
+
+/// `expiresAt` is epoch ms; both stores carry it so an expired token can't shadow a live one.
+@Test func claudeCredsParseExpiresAtFromMillis() {
+    let json = #"{"claudeAiOauth":{"accessToken":"sk-ant-oat01-x","subscriptionType":"max","expiresAt":1782679712840}}"#
+    let c = ClaudeCollector.creds(fromJSON: Data(json.utf8))
+    #expect(c?.accessToken == "sk-ant-oat01-x")
+    #expect(c?.subscriptionType == "max")
+    #expect(c?.expiresAt == Date(timeIntervalSince1970: 1782679712.840))
+}
+
+@Test func claudeCredsUsabilityHonorsExpiry() {
+    let now = Date(timeIntervalSince1970: 1_000_000)
+    let live = ClaudeCollector.Creds(accessToken: "t", subscriptionType: "max",
+                                     expiresAt: now.addingTimeInterval(3600))
+    let dead = ClaudeCollector.Creds(accessToken: "t", subscriptionType: "max",
+                                     expiresAt: now.addingTimeInterval(-3600))
+    let empty = ClaudeCollector.Creds(accessToken: "", subscriptionType: "max",
+                                      expiresAt: now.addingTimeInterval(3600))
+    let unknown = ClaudeCollector.Creds(accessToken: "t", subscriptionType: "max", expiresAt: nil)
+    #expect(live.isUsable(now: now))
+    #expect(!dead.isUsable(now: now))                 // expired → not usable
+    #expect(!empty.isUsable(now: now))                // no token → not usable
+    #expect(unknown.isUsable(now: now))               // unknown expiry → best-effort usable
+    // skew: a token lapsing within 120s is treated as already gone.
+    let soon = ClaudeCollector.Creds(accessToken: "t", subscriptionType: "max",
+                                     expiresAt: now.addingTimeInterval(60))
+    #expect(!soon.isUsable(now: now))
+}
+
+/// The exact incident: file token expired, Keychain token still valid → Keychain wins.
+@Test func claudeFresherPrefersLaterExpiringToken() {
+    let t0 = Date(timeIntervalSince1970: 1_000_000)
+    let staleFile = ClaudeCollector.Creds(accessToken: "old", subscriptionType: "max",
+                                          expiresAt: t0.addingTimeInterval(-86400))
+    let liveKeychain = ClaudeCollector.Creds(accessToken: "new", subscriptionType: "max",
+                                             expiresAt: t0.addingTimeInterval(3600))
+    #expect(ClaudeCollector.fresher(staleFile, liveKeychain)?.accessToken == "new")
+    #expect(ClaudeCollector.fresher(liveKeychain, staleFile)?.accessToken == "new")
+    // one side missing → take the present one; both missing → nil.
+    #expect(ClaudeCollector.fresher(staleFile, nil)?.accessToken == "old")
+    #expect(ClaudeCollector.fresher(nil, liveKeychain)?.accessToken == "new")
+    #expect(ClaudeCollector.fresher(nil, nil) == nil)
+}
+
+/// readCreds end to end: a valid file token is the fast path; an expired one is not
+/// returned as usable, so it can never shadow a live Keychain token.
+@Test func claudeReadCredsSkipsExpiredFile() throws {
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("hr-claude-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let path = dir.appendingPathComponent(".credentials.json")
+    let noKeychain = "Headroom-no-such-service-\(UUID().uuidString)"
+
+    // A valid (far-future) file token IS used as the fast path.
+    let liveJSON = #"{"claudeAiOauth":{"accessToken":"file-live","subscriptionType":"max","expiresAt":4102444800000}}"#
+    try Data(liveJSON.utf8).write(to: path)
+    #expect(ClaudeCollector(credentialsPath: path, keychainService: noKeychain)
+              .readCreds()?.accessToken == "file-live")
+
+    // An expired file token is NOT usable → fast path skipped (it never shadows a live token).
+    let deadJSON = #"{"claudeAiOauth":{"accessToken":"file-dead","subscriptionType":"max","expiresAt":1000000000000}}"#
+    try Data(deadJSON.utf8).write(to: path)
+    #expect(ClaudeCollector.credsFromFile(path)?.isUsable() == false)
+}

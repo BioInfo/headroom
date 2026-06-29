@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-06-29
+
+### Fixed
+- Claude usage no longer breaks after a logout/login on macOS. The collector read `~/.claude/.credentials.json` first and would keep using an expired token from that file even when the login Keychain held a freshly refreshed one, leaving Claude stuck on a stale reading. Credential selection is now expiry-aware: the file token is used only while valid, otherwise the collector falls back to the Keychain and the later-expiring token wins.
+
 ## [1.2.0] - 2026-06-18
 
 ### Added

@@ -75,13 +75,49 @@ public struct ClaudeCollector: Collector {
                              metrics: metrics, status: .ok)
     }
 
-    // MARK: - credentials (file first, Keychain fallback)
+    // MARK: - credentials (expiry-aware: file fast-path, Keychain fallback)
 
-    struct Creds { let accessToken: String?; let subscriptionType: String? }
+    struct Creds {
+        let accessToken: String?
+        let subscriptionType: String?
+        let expiresAt: Date?
 
-    /// File-first (cross-platform), then macOS Keychain. Whichever Claude Code uses.
+        /// A non-empty token that hasn't passed its expiry (with a small skew so a
+        /// token about to lapse isn't picked only to 401 on the next call). An
+        /// unknown expiry is treated as usable (best-effort) rather than discarded.
+        func isUsable(now: Date = Date()) -> Bool {
+            guard let t = accessToken, !t.isEmpty else { return false }
+            guard let exp = expiresAt else { return true }
+            return exp > now.addingTimeInterval(120)
+        }
+    }
+
+    /// File first as a fast path, but never trust an EXPIRED file token over a live
+    /// Keychain one. On macOS the CLI keeps its authoritative token in the Keychain
+    /// and refreshes it there; a `~/.claude/.credentials.json` written at login can
+    /// then drift stale (the logout/login failure mode). So: use the file token only
+    /// while it's still usable; otherwise consult the Keychain and take whichever
+    /// token is valid / expires later.
     func readCreds() -> Creds? {
-        Self.credsFromFile(credentialsPath) ?? Self.credsFromKeychain(service: keychainService)
+        let file = Self.credsFromFile(credentialsPath)
+        if let file, file.isUsable() { return file }          // fast path, no Keychain touch
+        let keychain = Self.credsFromKeychain(service: keychainService)
+        return Self.fresher(file, keychain)
+    }
+
+    /// Pick the better of two credential blobs: prefer the one whose token expires
+    /// later (a known future expiry beats an unknown one). Used only after the file
+    /// fast path misses, so this is where a stale file yields to a fresh Keychain.
+    static func fresher(_ a: Creds?, _ b: Creds?) -> Creds? {
+        switch (a, b) {
+        case (nil, nil): return nil
+        case (let x?, nil): return x
+        case (nil, let y?): return y
+        case (let x?, let y?):
+            let ex = x.expiresAt ?? .distantPast
+            let ey = y.expiresAt ?? .distantPast
+            return ey > ex ? y : x
+        }
     }
 
     /// `~/.claude/.credentials.json` — the universal store (Linux + many macOS setups).
@@ -107,12 +143,15 @@ public struct ClaudeCollector: Collector {
         #endif
     }
 
-    /// Both stores hold the same blob: `{ "claudeAiOauth": { accessToken, subscriptionType, … } }`.
-    private static func creds(fromJSON bytes: Data) -> Creds? {
+    /// Both stores hold the same blob: `{ "claudeAiOauth": { accessToken, subscriptionType, expiresAt, … } }`.
+    /// `expiresAt` is epoch milliseconds; we keep it so an expired token can't shadow a live one.
+    static func creds(fromJSON bytes: Data) -> Creds? {
         guard let obj = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any],
               let oauth = obj["claudeAiOauth"] as? [String: Any] else { return nil }
+        let expiresAt = (oauth["expiresAt"] as? Double).map { Date(timeIntervalSince1970: $0 / 1000) }
         return Creds(accessToken: oauth["accessToken"] as? String,
-                     subscriptionType: oauth["subscriptionType"] as? String)
+                     subscriptionType: oauth["subscriptionType"] as? String,
+                     expiresAt: expiresAt)
     }
 
     // MARK: - response shape (only the windows we render; unknown null siblings ignored)
