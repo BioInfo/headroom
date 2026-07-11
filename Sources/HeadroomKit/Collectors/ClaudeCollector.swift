@@ -156,14 +156,59 @@ public struct ClaudeCollector: Collector {
 
     // MARK: - response shape (only the windows we render; unknown null siblings ignored)
 
+    /// Two shapes coexist while Anthropic migrates the endpoint:
+    ///   • NEW (canonical): a `limits` array — one entry per active limit, each with a
+    ///     `kind` (`session` = 5h, `weekly_all` = overall weekly, `weekly_scoped` = a
+    ///     per-model weekly cap carrying `scope.model.display_name`), a `percent`, and a
+    ///     `resets_at`. The per-model weekly (e.g. the Opus/Fable weekly cap on Max — the
+    ///     one you're most likely to hit) lives ONLY here now.
+    ///   • OLD (back-compat): flat `five_hour` / `seven_day` / `seven_day_opus` /
+    ///     `seven_day_sonnet` sibling objects. `seven_day_opus`/`seven_day_sonnet` now come
+    ///     back null on current accounts — the scoped weekly moved into `limits`.
+    /// We prefer `limits` whenever it's present and non-empty; otherwise fall back to the
+    /// flat fields. `extra_usage` is a separate flat field in both shapes.
     struct Usage: Decodable {
+        let limits: [Limit]?
         let five_hour: Window?
         let seven_day: Window?
         let seven_day_opus: Window?
         let seven_day_sonnet: Window?
         let extra_usage: ExtraUsage?
 
+        /// The window meters. `extra_usage` is intentionally NOT here — it's surfaced
+        /// separately via `extraUsageMetric` (opt-in; a $ pool, not subscription headroom).
         var metrics: [Metric] {
+            (limits?.isEmpty == false) ? limitMetrics : flatMetrics
+        }
+
+        /// New-shape mapping: one Metric per known limit, in a stable session→weekly order.
+        private var limitMetrics: [Metric] {
+            let week: TimeInterval = 7 * 86400
+            return (limits ?? [])
+                .sorted { $0.rank < $1.rank }
+                .compactMap { l -> Metric? in
+                    guard let pct = l.percent else { return nil }
+                    let reset = ClaudeCollector.parseISO(l.resets_at)
+                    switch l.kind {
+                    case "session":
+                        return Metric(label: "5h window", percentUsed: pct, unit: .percent,
+                                      resetAt: reset, windowDuration: 5 * 3600)
+                    case "weekly_all":
+                        return Metric(label: "Weekly", percentUsed: pct, unit: .percent,
+                                      resetAt: reset, windowDuration: week)
+                    case "weekly_scoped":
+                        let model = l.scope?.model?.display_name ?? "model"
+                        return Metric(label: "Weekly (\(model))", percentUsed: pct, unit: .percent,
+                                      resetAt: reset, windowDuration: week)
+                    default:
+                        return nil   // unknown kind — don't render a mystery meter
+                    }
+                }
+        }
+
+        /// Old-shape mapping (kept for accounts still on the flat fields, and for the
+        /// captured-fixture tests). `seven_day_opus`/`seven_day_sonnet` are usually null now.
+        private var flatMetrics: [Metric] {
             let week: TimeInterval = 7 * 86400
             var m: [Metric] = []
             if let w = five_hour      { m.append(w.metric(label: "5h window", window: 5 * 3600)) }
@@ -190,6 +235,32 @@ public struct ClaudeCollector: Collector {
                    resetAt: ClaudeCollector.parseISO(resets_at), windowDuration: window)
         }
     }
+
+    /// One entry in the new `limits` array. `kind` is the discriminator
+    /// (`session` / `weekly_all` / `weekly_scoped`); `percent` is already 0...100;
+    /// `scope.model.display_name` names the model a `weekly_scoped` cap applies to.
+    /// `is_active` / `severity` are carried by the API but not yet rendered (percent
+    /// already drives the tier color and threshold alerts).
+    struct Limit: Decodable {
+        let kind: String?
+        let group: String?
+        let percent: Double?
+        let resets_at: String?
+        let scope: LimitScope?
+
+        /// Stable display order: 5h first, then overall weekly, then per-model weekly.
+        var rank: Int {
+            switch kind {
+            case "session": return 0
+            case "weekly_all": return 1
+            case "weekly_scoped": return 2
+            default: return 3
+            }
+        }
+    }
+
+    struct LimitScope: Decodable { let model: LimitModel? }
+    struct LimitModel: Decodable { let display_name: String? }
 
     struct ExtraUsage: Decodable {
         let is_enabled: Bool?

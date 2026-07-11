@@ -87,6 +87,7 @@ final class AppModel {
             MiniMaxCollector(),
             zai,
             KimiCollector(),
+            GrokCollector(),
         ]
         return all.filter { prefs.isEnabled($0.id) }
     }

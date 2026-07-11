@@ -19,6 +19,7 @@ enum ProviderInfo {
         case "minimax": s = "https://platform.minimax.io/user-center/basic-information"
         case "zai":     s = "https://z.ai/manage-apikey/coding-plan/personal/usage"
         case "kimi":    s = "https://www.kimi.com/code/console"
+        case "grok":    s = "https://grok.com"
         default:        s = nil
         }
         return s.flatMap(URL.init(string:))
@@ -32,6 +33,7 @@ enum ProviderInfo {
         case "minimax": "M"
         case "zai":     "G"   // GLM
         case "kimi":    "K"
+        case "grok":    "R"   // gRok (G is taken by GLM, X by Codex)
         default:        String(id.prefix(1)).uppercased()
         }
     }
@@ -45,6 +47,7 @@ enum ProviderInfo {
         case "minimax": skin.ramp(.critical)   // rust
         case "zai":     skin.ramp(.runaway)    // aubergine
         case "kimi":    skin.ramp(.warming)    // clay-amber
+        case "grok":    skin.clay              // graphite-taupe (xAI reads dark; clay is our neutral)
         default:        skin.clay
         }
     }

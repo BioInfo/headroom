@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-07-11
+
+### Added
+- Grok provider. Tracks the SuperGrok / Grok Build weekly credit allowance, browser-free, by reading the Grok CLI's own local OIDC token (`~/.grok/auth.json`) and calling the billing endpoint the CLI itself polls. Shows weekly usage percent and reset countdown, like the other providers. Default on.
+
+### Changed
+- Claude usage now reads Anthropic's new `limits` response shape. The API moved the per-model weekly cap into a `limits` array (and stopped populating the old `seven_day_opus` / `seven_day_sonnet` fields), so Headroom now surfaces the per-model weekly meter (e.g. the Opus-tier weekly cap most likely to bind on Max) and stays correct through the migration. Falls back to the legacy flat fields when the array is absent.
+
 ## [1.2.1] - 2026-06-29
 
 ### Fixed

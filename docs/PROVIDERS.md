@@ -53,7 +53,7 @@ The GLM hypothesis held: MiniMax's usage endpoint accepts the coding-plan subscr
   - One entry per model class: `general` (= text/coding plan, what we surface) and `video`. v1 shows only `general`.
   - `*_remaining_percent` is REMAINING → `percentUsed = 100 - it`. Times are **epoch milliseconds**; `end_time`/`weekly_end_time` are resets; window length = `(end - start)/1000` (5h interval = 18000s).
   - Errors come back HTTP 200 with `base_resp.status_code != 0`: `2049` = invalid key → `.needsLogin`; other non-zero → `.error`.
-  - **Unlimited windows (`current_*_status: 3`):** a window with `status == 3` is uncapped, returning `remaining_percent: 100` forever. On the coding plan the **weekly is unlimited** (status 3), as is any unused model class (`video`). Headroom renders these as a real **`Metric.unlimited`** ("Unlimited", no bar) instead of a misleading 0%, and excludes them from gauges/tightest/notify/history. (Status 1 = the active limited 5h window. Other status values unobserved → treated as limited.) Confirmed against the live response + Justin 2026-06-14.
+  - **Unlimited windows (`current_*_status: 3`):** a window with `status == 3` is uncapped, returning `remaining_percent: 100` forever. On the coding plan the **weekly is unlimited** (status 3), as is any unused model class (`video`). Headroom renders these as a real **`Metric.unlimited`** ("Unlimited", no bar) instead of a misleading 0%, and excludes them from gauges/tightest/notify/history. (Status 1 = the active limited 5h window. Other status values unobserved → treated as limited.) Confirmed against the live response, 2026-06-14.
 - **Reset semantics:** rolling 5-hour interval + weekly window, each its own start/end. Matches Claude/Codex. The weekly carries a reset boundary but, being uncapped, Headroom drops it (no depletion to reset).
 - **Verified live:** `headroom doctor` → plan=Coding, 5h ~11% used, weekly "unlimited (no cap)". Parse locked by `MiniMaxCollectorTests`.
 - **License note:** endpoint + Bearer + field names found by probing a real key against the documented endpoint; no code copied.
@@ -69,12 +69,16 @@ The GLM hypothesis held: MiniMax's usage endpoint accepts the coding-plan subscr
   - The blob also carries `subscriptionType` (e.g. `max`) → used as the plan label. Token is read fresh each poll so the CLI owns refresh.
 - **Usage endpoint:** `GET https://api.anthropic.com/api/oauth/usage`
   - **Auth: `Authorization: Bearer <oat token>`** only. No `anthropic-beta`, no `anthropic-version` needed (tested: Bearer-only returns 200).
-- **Response shape:** `{ five_hour, seven_day, seven_day_opus, seven_day_sonnet, extra_usage, …many null siblings }`
-  - Each window: `{ utilization (Double percent 0–100), resets_at }`. `resets_at` is ISO-8601 **with microseconds + offset** (`2026-06-14T02:59:59.160907+00:00`) → needs `.withFractionalSeconds` (plain ISO8601 returns nil).
-  - `extra_usage`: `{ is_enabled, monthly_limit, used_credits, utilization, currency }` — the monthly extra-usage credit pool. Mapped only when `is_enabled`, as a `.usd` metric (used/limit credits + percent).
+- **Response shape (migrating — two coexist, 2026-07-11):**
+  - **NEW, canonical: a `limits` array.** One entry per active limit: `{ group, kind, percent (0–100), is_active, resets_at, severity, scope? }`. `kind` ∈ `session` (the 5h window), `weekly_all` (overall weekly), `weekly_scoped` (a **per-model** weekly cap; carries `scope.model.display_name`, e.g. `Fable` — the top Opus-tier model). This is now the ONLY place the per-model weekly lives — the flat `seven_day_opus`/`seven_day_sonnet` came back **null** on a live `max` account (2026-07-11). `weekly_scoped.resets_at` can be `null` (no countdown, still a valid meter).
+  - **OLD, back-compat: flat sibling objects** `{ five_hour, seven_day, seven_day_opus, seven_day_sonnet, extra_usage, …many null siblings }`. Each window: `{ utilization (Double percent 0–100), resets_at }`. Still sent alongside `limits` (`five_hour`↔`session`, `seven_day`↔`weekly_all`).
+  - **Collector prefers `limits` when present & non-empty**, else the flat fields (so old-shape accounts and the captured-fixture tests keep working). Emits exactly one "Weekly" — no double-count from `seven_day` + `weekly_all`. Unknown `kind`s are skipped, not rendered as mystery meters.
+  - `resets_at` is ISO-8601 **with microseconds + offset** (`2026-07-11T12:50:00.343377+00:00`) → needs `.withFractionalSeconds` (plain ISO8601 returns nil).
+  - `extra_usage`: `{ is_enabled, monthly_limit, used_credits, utilization, currency }` — the monthly extra-usage credit pool. Mapped only when `is_enabled`, as a `.usd` metric (used/limit credits + percent). Separate from the windows in both shapes.
   - Sibling profile endpoint (not needed, but available): `GET /api/oauth/profile` → account + org + `rate_limit_tier` + `has_claude_max`.
-- **Reset semantics:** rolling 5-hour (`five_hour`) + weekly (`seven_day`, plus per-model `seven_day_opus`/`seven_day_sonnet`), each its own `resets_at`. No reset on extra_usage.
-- **Verified live:** `headroom usage` → plan=max, 5h 30% / weekly 15% / Sonnet 3% / Extra usage 69%, with reset dates. Parse locked by `ClaudeCollectorTests`.
+- **Reset semantics:** rolling 5-hour (`session`) + weekly (`weekly_all`, plus per-model `weekly_scoped`), each its own `resets_at`. No reset on extra_usage.
+- **The weekly cap is a real binding constraint** (confirmed hitting the weekly limit on a Max account, 2026-07-10). The per-model `weekly_scoped` (Opus/Fable weekly) is the one most likely to bite on Max, and it now surfaces as a "Weekly (Fable)" meter → feeds the menu-bar tightest logic, is pinnable, and triggers threshold notifications if enabled. `severity`/`is_active` from the API are carried but not yet rendered (percent already drives the tier color + alerts).
+- **Verified live:** `headroom usage` → plan=max, meters `5h window` / `Weekly` / `Weekly (Fable)` (2026-07-11, all low after a weekly reset). Earlier flat-shape capture: 5h 30% / weekly 15% / Sonnet 3% / Extra usage 69%. Both shapes locked by `ClaudeCollectorTests`.
 - **License note:** endpoint + Bearer + field names discovered by probing a real local token; no code copied. Token never stored, logged, or committed.
 - **Status:** BUILT + wired into the CLI host and app. Browser-free.
 
@@ -103,9 +107,22 @@ DevTools spike on a logged-in AI Studio session (2026-06-14) confirmed there is 
 - The real Gemini API quota (RPM/RPD/TPM) lives in **Google Cloud Console → Quotas**, project-scoped behind full OAuth, and only means anything for paid-API-with-billing-project users. Free-tier AI Studio just rate-limits with 429s.
 - Decision (2026-06-14): **removed** — it's the "Google-painful" setup we don't want, and there's no gauge to render anyway. Collector + scaffold deleted.
 
-## Grok — `grok`
+## Grok — `grok`  ✅ BUILT 2026-07-11 (browser-free, LIVE local-OIDC + billing endpoint)
 
-- Deferred. Not a priority.
+**Final approach: Codex-pattern.** Read the Grok CLI's own local OIDC token and hit the billing endpoint the CLI itself polls. Browser-free, no cookies, no protobuf.
+
+- **Credential:** `~/.grok/auth.json`, one entry keyed by `https://auth.x.ai::<client_id>` → `key` (the OIDC access token, ~6h TTL, `refresh_token` sibling). We match structurally (first entry with a non-empty `key`), so no hard-coded client_id. The CLI owns refresh.
+- **Usage endpoint:** `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits`
+  - **Auth:** `Authorization: Bearer <token>` + `x-grok-client-version: <cli version>` (found in the grok binary's `billing.rs`). `accept: application/json`.
+- **Response shape:** `{ config: { creditUsagePercent (0–100), currentPeriod: { start, end, type }, subscriptionTier?, productUsage[], onDemandCap/Used, prepaidBalance, isUnifiedBillingUser } }`
+  - `creditUsagePercent` is the weekly usage % against the SuperGrok / Grok Build allowance — **this is the meter**. `currentPeriod.type` = `USAGE_PERIOD_TYPE_WEEKLY` → labeled "Weekly"; `start`/`end` are ISO-8601 **with microseconds + offset** (needs `.withFractionalSeconds`), window length ≈ 604800.
+  - `productUsage` splits the weekly total by product (e.g. `Api` 96% / `GrokChat` 4%) — informational, not surfaced as its own meter in v1.
+  - `subscriptionTier` (e.g. `SuperGrok`) is present in some responses → used as the plan label when there.
+- **Reset semantics:** one rolling weekly window (`currentPeriod`), reset at `end`. `402 Payment Required: Grok Build usage balance exhausted` = you're capped for the window (still authed); 401/403 = token → both report `.stale` (keep last good).
+- **Verified live (2026-07-11):** `headroom usage` → Grok, Weekly 100%, resets 2026-07-12T13:44:34Z (a live weekly cap reading of 100%). Parse locked by `GrokCollectorTests`.
+- **Correction to the 2026-07-10 deferral:** it concluded "no exposable coding meter, blocked by an xAI account-entitlement allowlist." Both wrong. The `403 personal-team-blocked:spending-limit` was the **DGX gateway OAuth shim**, not the account; the **direct CLI** returns a clean `402 usage balance exhausted` and a pollable `/v1/billing` credits config. The dev-API (`api.x.ai`) genuinely has no usage endpoint, but `cli-chat-proxy.grok.com/v1/billing` does. The consumer `grok.com/rest/rate-limits` (chat windows) is a separate surface we still don't use.
+- **License/clean-room note:** endpoint + header + field names discovered by probing a real local token + `strings` on the CLI binary; no code copied. (A competing OSS tracker, CodexBar, reads Grok via a heavier gRPC-web + browser-cookie path; our plain-JSON GET is independent and simpler.) Token never stored, logged, or committed.
+- **Status:** BUILT + wired into the CLI host and app, default-enabled. Browser-free.
 
 ## Service status pages (live health, not usage)  ✅ CAPTURED 2026-06-14
 

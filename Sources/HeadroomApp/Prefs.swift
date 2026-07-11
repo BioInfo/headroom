@@ -59,11 +59,11 @@ final class Prefs {
     static let shared = Prefs()
 
     /// Every provider Headroom knows about, in display order.
-    static let allProviderIDs = ["claude", "codex", "minimax", "zai", "kimi"]
+    static let allProviderIDs = ["claude", "codex", "minimax", "zai", "kimi", "grok"]
     /// On by default: every provider Headroom knows about. Local-creds ones (Claude/Codex)
     /// work with zero setup; key/token ones (MiniMax/GLM/Kimi) show a one-line "add a key"
     /// prompt until pasted — the discoverable funnel, consistent across all paste providers.
-    static let defaultEnabled: Set<String> = ["claude", "codex", "minimax", "zai", "kimi"]
+    static let defaultEnabled: Set<String> = ["claude", "codex", "minimax", "zai", "kimi", "grok"]
 
     @ObservationIgnored private let d = UserDefaults.standard
 
@@ -125,6 +125,7 @@ final class Prefs {
         case "minimax": "MiniMax"
         case "zai":     "GLM (z.ai)"
         case "kimi":    "Kimi"
+        case "grok":    "Grok"
         default:        id.capitalized
         }
     }
@@ -133,7 +134,7 @@ final class Prefs {
     enum Kind { case local, key, web, login }
     static func kind(_ id: String) -> Kind {
         switch id {
-        case "claude", "codex": .local        // read local creds/logs, zero setup
+        case "claude", "codex", "grok": .local  // read local creds/logs, zero setup
         case "minimax":         .key          // paste-once API key
         case "kimi":            .key          // paste-once session token (no API key exists)
         case "zai":             .web          // pasted key (primary) OR browser login (fallback)

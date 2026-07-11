@@ -20,7 +20,7 @@ func emit(_ usages: [ProviderUsage]) {
 /// Collectors that need no WKWebView run here: Claude + Codex read local creds/logs,
 /// MiniMax uses a local key, Kimi uses a pasted token (Bearer, no cookie). z.ai's key path
 /// would work headless too, but it keeps a webview fallback so it runs in Headroom.app.
-let headless: [any Collector] = [ClaudeCollector(), CodexCollector(), MiniMaxCollector(), KimiCollector()]
+let headless: [any Collector] = [ClaudeCollector(), CodexCollector(), MiniMaxCollector(), KimiCollector(), GrokCollector()]
 
 func runHeadlessCollectors() async -> [ProviderUsage] {
     var out: [ProviderUsage] = []
