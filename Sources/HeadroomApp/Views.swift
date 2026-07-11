@@ -41,7 +41,7 @@ struct MenuContent: View {
     private func openSettings() { surface("settings") }
 
     var body: some View {
-        let skin = Skin(scheme)
+        let skin = Skin(model.prefs.effectiveScheme(scheme))
         VStack(alignment: .leading, spacing: 11) {
             // Dev: `--open <id>` opens that window on launch (for screenshots).
             Color.clear.frame(height: 0).task {

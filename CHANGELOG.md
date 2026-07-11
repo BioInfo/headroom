@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-07-11
+
+### Added
+- Light / Dark appearance override (Settings → Appearance). Pin the popover and windows to Light or Dark, or follow the system as before. The menu-bar glyph looks the same either way.
+- Snooze notifications for 1 or 4 hours (Settings → General). Mutes alert delivery without losing track: state keeps advancing underneath, so when the snooze ends you only hear about new changes, not a backlog of everything that happened while you were quiet. Survives a relaunch; resume any time.
+- Adaptive refresh cadence (opt-in, Settings → General). Instead of a fixed interval, Headroom polls every 2–30 minutes based on how recently you opened it — fast while you're watching, coasting when you've stepped away — and backs off to 30 minutes on Low Power Mode or high heat. Opening the menu also freshens the readings on the spot. The fixed slider stays the default; nothing changes unless you turn adaptive on.
+- Window-exhausted and window-back alerts (Settings → General → notifications, on by default). When a window hits its cap you get one "exhausted" alert — the one that means you're actually locked out — independent of the percentage thresholds, and a "back" alert when it resets. Distinct from the threshold and refill pings, and never double-fires on the same reset.
+
 ## [1.3.0] - 2026-07-11
 
 ### Added

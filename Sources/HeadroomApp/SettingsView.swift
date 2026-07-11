@@ -47,7 +47,7 @@ struct SettingsView: View {
     }
 
     var body: some View {
-        let skin = Skin(scheme)
+        let skin = Skin(model.prefs.effectiveScheme(scheme))
         VStack(spacing: 0) {
             // Custom segmented header: always-visible icon+label tabs. A plain Window's
             // TabView collapses into a "Navigation Tab Bar" overflow popup on recent macOS,
@@ -81,7 +81,7 @@ struct SettingsView: View {
                 switch tab {
                 case .providers:  ProvidersTab(model: model, skin: skin, openLogin: openLogin)
                 case .appearance: AppearanceTab(model: model, skin: skin)
-                case .general:    GeneralTab(prefs: model.prefs, skin: skin)
+                case .general:    GeneralTab(model: model, prefs: model.prefs, skin: skin)
                 case .updates:    UpdatesTab(updater: model.updater, prefs: model.prefs, skin: skin)
                 case .about:      AboutTab(skin: skin)
                 }
@@ -250,6 +250,15 @@ private struct AppearanceTab: View {
     var body: some View {
         Form {
             Section {
+                Picker("Appearance", selection: Binding(
+                    get: { prefs.appearance }, set: { prefs.appearance = $0 })) {
+                    ForEach(AppAppearance.allCases) { Text($0.title).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                Text("Pin the popover and windows to Light or Dark, or follow the system. The menu-bar glyph looks the same either way.")
+                    .font(.caption).foregroundStyle(skin.faint)
+            }
+            Section {
                 Picker("Menu-bar shows", selection: Binding(get: { mode }, set: { setMode($0) })) {
                     Text("Tightest meter (all providers)").tag(Mode.tightest)
                     Text("Specific providers (up to \(GlyphSource.maxProviders))").tag(Mode.providers)
@@ -308,22 +317,40 @@ private struct AppearanceTab: View {
 // MARK: - General
 
 private struct GeneralTab: View {
+    let model: AppModel
     @Bindable var prefs: Prefs
     let skin: Skin
     @State private var launchAtLogin = LoginItem.isEnabled
 
+    /// The live adaptive cadence line, e.g. "Checking every 2 min · you just looked".
+    private var adaptiveCaption: String {
+        guard let d = model.adaptiveDecision else { return "Checks faster while you're looking, slower when idle." }
+        return "Checking every \(d.minutes) min · \(d.reason.caption)."
+    }
+
     var body: some View {
         Form {
             Section {
-                HStack {
-                    Text("Refresh every")
-                    Slider(value: Binding(get: { Double(prefs.refreshMinutes) },
-                                          set: { prefs.refreshMinutes = Int($0) }),
-                           in: 1...60, step: 1)
-                    Text("\(prefs.refreshMinutes) min").monospacedDigit().foregroundStyle(skin.ink2)
-                        .frame(width: 56, alignment: .trailing)
+                Toggle("Adaptive refresh", isOn: $prefs.adaptiveRefresh)
+                    .onChange(of: prefs.adaptiveRefresh) { _, _ in _ = model.nextBaseInterval() }
+                if prefs.adaptiveRefresh {
+                    Text(adaptiveCaption)
+                        .font(.caption).foregroundStyle(skin.faint).padding(.leading, 18)
+                } else {
+                    HStack {
+                        Text("Refresh every")
+                        Slider(value: Binding(get: { Double(prefs.refreshMinutes) },
+                                              set: { prefs.refreshMinutes = Int($0) }),
+                               in: 1...60, step: 1)
+                        Text("\(prefs.refreshMinutes) min").monospacedDigit().foregroundStyle(skin.ink2)
+                            .frame(width: 56, alignment: .trailing)
+                    }
                 }
                 Toggle("Refresh on wake from sleep", isOn: $prefs.refreshOnWake)
+                if prefs.adaptiveRefresh {
+                    Text("Polls every 2–30 min based on how recently you opened Headroom, and backs off on Low Power Mode or high heat. Ignores the fixed interval.")
+                        .font(.caption).foregroundStyle(skin.faint)
+                }
             }
             Section {
                 Toggle("Check provider status pages", isOn: $prefs.checkProviderStatus)
@@ -368,8 +395,23 @@ private struct GeneralTab: View {
                         }
                     }
                     Toggle("Play a sound", isOn: $prefs.notifySound)
+                    Toggle("Alert when a window is exhausted (and when it's back)", isOn: $prefs.notifyOnDeplete)
                     Toggle("Ping when a window refills", isOn: $prefs.notifyOnReset)
-                    Text("Alerts when a meter crosses a level, naming the window. Quiet: one per crossing.")
+                    if prefs.isSnoozed, let until = prefs.snoozeUntil {
+                        HStack {
+                            Text("Snoozed until \(until.formatted(date: .omitted, time: .shortened))")
+                                .foregroundStyle(skin.ink2)
+                            Spacer()
+                            Button("Resume") { prefs.snoozeUntil = nil }
+                        }
+                    } else {
+                        Menu("Snooze notifications") {
+                            Button("For 1 hour")  { prefs.snoozeUntil = Date().addingTimeInterval(3600) }
+                            Button("For 4 hours") { prefs.snoozeUntil = Date().addingTimeInterval(4 * 3600) }
+                        }
+                        .fixedSize()
+                    }
+                    Text("Alerts when a meter crosses a level, naming the window. Quiet: one per crossing. “Exhausted” fires at the cap whatever the levels — the alert that means you're locked out.")
                         .font(.caption).foregroundStyle(skin.faint)
                 }
             }

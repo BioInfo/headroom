@@ -1,5 +1,29 @@
 import Foundation
 import Observation
+import SwiftUI
+
+/// App appearance: follow the system, or pin Light/Dark. Affects the popover and windows
+/// (their cream/espresso skin). The menu-bar glyph is appearance-agnostic — its warm ramp
+/// reads on both — so this never touches the menu bar.
+enum AppAppearance: String, CaseIterable, Identifiable {
+    case system, light, dark
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .system: "System"
+        case .light:  "Light"
+        case .dark:   "Dark"
+        }
+    }
+    /// The forced color scheme, or nil to follow the system.
+    var scheme: ColorScheme? {
+        switch self {
+        case .system: nil
+        case .light:  .light
+        case .dark:   .dark
+        }
+    }
+}
 
 /// The shape of the menu-bar glyph. Orthogonal to `GlyphSource` (what it tracks): this is
 /// how the fill is drawn. The chef-hat is the family mark; bar + battery are alternates for
@@ -69,14 +93,32 @@ final class Prefs {
 
     var enabledProviders: Set<String> { didSet { d.set(Array(enabledProviders), forKey: "enabledProviders") } }
     var refreshMinutes: Int           { didSet { d.set(refreshMinutes, forKey: "refreshMinutes") } }
+    /// Adaptive polling: pick the base interval from interaction recency + power/thermal
+    /// state (see `AdaptiveCadence`) instead of the fixed slider. Opt-in — default off, so no
+    /// existing user's fixed cadence changes without asking. When on, `refreshMinutes` is ignored.
+    var adaptiveRefresh: Bool         { didSet { d.set(adaptiveRefresh, forKey: "adaptiveRefresh") } }
     var notify: Bool                  { didSet { d.set(notify, forKey: "notify") } }
     var notifySound: Bool             { didSet { d.set(notifySound, forKey: "notifySound") } }
     var notifyOnReset: Bool           { didSet { d.set(notifyOnReset, forKey: "notifyOnReset") } }
+    /// Alert when a window is fully exhausted (you're locked out) and again when it's back —
+    /// threshold-independent, the highest-value alert. Default on when notifications are on.
+    var notifyOnDeplete: Bool         { didSet { d.set(notifyOnDeplete, forKey: "notifyOnDeplete") } }
+    /// Suppress notification *delivery* until this time ("snooze"). State still advances
+    /// underneath, so resuming doesn't dump a backlog — you just miss pings while muted.
+    /// Persisted so a snooze survives relaunch; nil = not snoozed.
+    var snoozeUntil: Date? {
+        didSet {
+            if let s = snoozeUntil { d.set(s.timeIntervalSince1970, forKey: "snoozeUntil") }
+            else { d.removeObject(forKey: "snoozeUntil") }
+        }
+    }
     var notifyThresholds: [Int]       { didSet { d.set(notifyThresholds, forKey: "notifyThresholds") } }
     var showClaudeExtraUsage: Bool    { didSet { d.set(showClaudeExtraUsage, forKey: "showClaudeExtraUsage") } }
     var refreshOnWake: Bool           { didSet { d.set(refreshOnWake, forKey: "refreshOnWake") } }
     var glyphSource: GlyphSource      { didSet { d.set(glyphSource.stored, forKey: "glyphSource") } }
     var glyphStyle: GlyphStyle        { didSet { d.set(glyphStyle.rawValue, forKey: "glyphStyle") } }
+    /// Force the app's Light/Dark appearance, or follow the system (default). See `AppAppearance`.
+    var appearance: AppAppearance     { didSet { d.set(appearance.rawValue, forKey: "appearance") } }
     /// Per-provider pinned meter: provider id → the meter label to track in the menu bar
     /// (e.g. "claude" → "Weekly"). Absent = use that provider's tightest meter. Self-heals:
     /// if a pinned label disappears, the lookup misses and falls back to tightest.
@@ -97,14 +139,18 @@ final class Prefs {
         let saved = d.array(forKey: "enabledProviders") as? [String]
         enabledProviders = saved.map(Set.init) ?? Self.defaultEnabled
         refreshMinutes = (d.object(forKey: "refreshMinutes") as? Int) ?? 15
+        adaptiveRefresh = d.bool(forKey: "adaptiveRefresh")   // default false (opt-in)
         notify = d.bool(forKey: "notify")                          // default false (quiet)
         notifySound = (d.object(forKey: "notifySound") as? Bool) ?? true
         notifyOnReset = (d.object(forKey: "notifyOnReset") as? Bool) ?? false
+        notifyOnDeplete = (d.object(forKey: "notifyOnDeplete") as? Bool) ?? true
+        snoozeUntil = (d.object(forKey: "snoozeUntil") as? Double).map { Date(timeIntervalSince1970: $0) }
         notifyThresholds = (d.array(forKey: "notifyThresholds") as? [Int]) ?? [75, 90, 95]
         showClaudeExtraUsage = d.bool(forKey: "showClaudeExtraUsage")
         refreshOnWake = (d.object(forKey: "refreshOnWake") as? Bool) ?? true
         glyphSource = GlyphSource(stored: d.string(forKey: "glyphSource") ?? "tightest")
         glyphStyle = GlyphStyle(rawValue: d.string(forKey: "glyphStyle") ?? "") ?? .hat
+        appearance = AppAppearance(rawValue: d.string(forKey: "appearance") ?? "") ?? .system
         pinnedMeters = (d.dictionary(forKey: "pinnedMeters") as? [String: String]) ?? [:]
         checkProviderStatus = (d.object(forKey: "checkProviderStatus") as? Bool) ?? true
         hasOnboarded = d.bool(forKey: "hasOnboarded")   // default false → show onboarding once
@@ -112,6 +158,14 @@ final class Prefs {
         peakHoursFlame = (d.object(forKey: "peakHoursFlame") as? Bool) ?? true
         autoUpdate = (d.object(forKey: "autoUpdate") as? Bool) ?? true
     }
+
+    /// The scheme a view should skin with: the pinned appearance, or the passed system
+    /// scheme when following the system. Deterministic from the pref, so a forced Light/Dark
+    /// wins over the ambient environment (including in the snapshot harness).
+    func effectiveScheme(_ system: ColorScheme) -> ColorScheme { appearance.scheme ?? system }
+
+    /// True while a snooze is active (its expiry is still in the future).
+    var isSnoozed: Bool { (snoozeUntil.map { Date() < $0 }) ?? false }
 
     func isEnabled(_ id: String) -> Bool { enabledProviders.contains(id) }
     func setEnabled(_ id: String, _ on: Bool) {

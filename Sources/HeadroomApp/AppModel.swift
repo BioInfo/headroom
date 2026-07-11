@@ -11,6 +11,11 @@ final class AppModel {
     var isRefreshing = false
     var lastRefresh: Date?
 
+    /// The most recent adaptive-cadence decision (delay + reason), or nil in fixed-interval
+    /// mode. Observable so the Settings "Adaptive refresh" row can show the live cadence
+    /// ("Currently every 2 min · you just looked"). Recomputed each loop tick.
+    var adaptiveDecision: AdaptiveCadence.Decision?
+
     /// The menu-bar glyph state, held as STORED observable properties and recomputed
     /// explicitly (`recomputeMenuBar`) whenever usages or the glyph prefs change. The
     /// `MenuBarExtra` label reads these directly so it has an unambiguous Observation
@@ -117,6 +122,10 @@ final class AppModel {
     /// When each provider was last polled — drives cadence-aware refresh (local providers
     /// every tick, remote ones at half the rate).
     @ObservationIgnored private var lastCollected: [String: Date] = [:]
+    /// When the menu-bar popover was last opened, this launch only. In-memory, never
+    /// persisted (resets each launch) — feeds `AdaptiveCadence` so polling stays fast while
+    /// you're actively looking and coasts once you step away.
+    @ObservationIgnored private var lastMenuOpenAt: Date?
     /// Most recent reading per provider; rebuilt into `usages` (display order) each tick so
     /// a provider skipped this cycle keeps showing its last value instead of vanishing.
     @ObservationIgnored private var current: [String: ProviderUsage] = [:]
@@ -142,13 +151,42 @@ final class AppModel {
         refreshTask = Task { [weak self] in
             var first = true
             while !Task.isCancelled {
-                await self?.refresh(force: first)   // force the initial load; then honor cadence
+                // One base interval per cycle, used for BOTH this refresh's per-provider
+                // due-check and the sleep after it — so a fixed slider change (or the adaptive
+                // decision) takes effect on the same tick, and remote providers' relaxed
+                // cadence stays "half of whatever the base is right now".
+                let base = self?.nextBaseInterval() ?? 15 * 60
+                await self?.refresh(force: first, base: base)
                 first = false
-                // Re-read the interval each cycle so a Settings change takes effect next tick.
-                let mins = self?.prefs.refreshMinutes ?? 15
-                try? await Task.sleep(for: .seconds(max(1, mins) * 60))
+                try? await Task.sleep(for: .seconds(base))
             }
         }
+    }
+
+    /// The base refresh interval for the next cycle. In adaptive mode, decides from live Low
+    /// Power / thermal state + interaction recency (`AdaptiveCadence`) and records the
+    /// decision for the Settings display; in fixed mode, the user's slider value. This is
+    /// also the `base` the per-provider `.relaxed` cadence is measured against.
+    func nextBaseInterval() -> TimeInterval {
+        guard prefs.adaptiveRefresh else {
+            adaptiveDecision = nil
+            return TimeInterval(max(1, prefs.refreshMinutes) * 60)
+        }
+        let pi = ProcessInfo.processInfo
+        let thermal = pi.thermalState == .serious || pi.thermalState == .critical
+        let d = AdaptiveCadence.decide(.init(now: Date(), lastMenuOpenAt: lastMenuOpenAt,
+                                             lowPowerMode: pi.isLowPowerModeEnabled,
+                                             thermalConstrained: thermal))
+        adaptiveDecision = d
+        return d.delay
+    }
+
+    /// Record a menu-bar popover open. Feeds `AdaptiveCadence` (recency band) so the next
+    /// tick tightens to the fast cadence, and freshens data on look via `refreshIfStale`.
+    /// Called from the popover's `.onAppear`.
+    func noteMenuOpened() {
+        lastMenuOpenAt = Date()
+        Task { await refreshIfStale() }
     }
 
     /// Refresh on wake from sleep (debounced) — a menu-bar app that's stale after the lid
@@ -166,8 +204,11 @@ final class AppModel {
 
     func stop() { refreshTask?.cancel(); refreshTask = nil }
 
-    /// Refresh immediately if it's been at least a minute (debounce wake/manual storms).
+    /// Refresh immediately if it's been at least a minute (debounce wake/menu-open/manual
+    /// storms), unless one is already in flight — the running refresh will deliver fresh data
+    /// momentarily, so a second one would only pile on at an await boundary.
     func refreshIfStale(minGap: TimeInterval = 60) async {
+        if isRefreshing { return }
         if let last = lastRefresh, Date().timeIntervalSince(last) < minGap { return }
         await refresh()
     }
@@ -176,11 +217,14 @@ final class AppModel {
     /// load, the manual button, a key/enable change, a wake refresh). Cadence-aware: local
     /// collectors poll at the base interval; remote ones at half the rate (`RefreshCadence`).
     /// A provider skipped this cycle keeps its last reading rather than blanking.
-    func refresh(force: Bool = true) async {
+    func refresh(force: Bool = true, base: TimeInterval? = nil) async {
         isRefreshing = true
         defer { isRefreshing = false }
         let now = Date()
-        let base = TimeInterval(max(1, prefs.refreshMinutes) * 60)
+        // The per-provider due-check is measured against this base. The loop passes the
+        // cycle's base (fixed or adaptive); non-loop callers (manual, wake, key/enable)
+        // force a refresh, so `base` is unused there and just defaults to the slider value.
+        let base = base ?? TimeInterval(max(1, prefs.refreshMinutes) * 60)
         let active = collectors
         let activeIDs = Set(active.map { $0.id })
         var collectedAny = false
@@ -219,7 +263,8 @@ final class AppModel {
         UsageHistory.shared.record(usages)   // append today's reading for trend/heatmap
         warmHistory()                         // keep the History window's cache fresh
         notifier.evaluate(usages, thresholds: prefs.notifyThresholds, enabled: prefs.notify,
-                          sound: prefs.notifySound, onReset: prefs.notifyOnReset)
+                          sound: prefs.notifySound, onReset: prefs.notifyOnReset,
+                          onDeplete: prefs.notifyOnDeplete, snoozeUntil: prefs.snoozeUntil)
     }
 
     /// Fetch provider service health from the public status pages, throttled to every 5 min

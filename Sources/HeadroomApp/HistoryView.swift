@@ -18,7 +18,7 @@ struct HistoryView: View {
     @State private var tokenProvider = "claude"
 
     var body: some View {
-        let skin = Skin(scheme)
+        let skin = Skin(model.prefs.effectiveScheme(scheme))
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 header(skin)

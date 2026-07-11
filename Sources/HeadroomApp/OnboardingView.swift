@@ -11,7 +11,7 @@ struct OnboardingView: View {
     @Environment(\.colorScheme) private var scheme
 
     var body: some View {
-        let skin = Skin(scheme)
+        let skin = Skin(prefs.effectiveScheme(scheme))
         VStack(spacing: 0) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {

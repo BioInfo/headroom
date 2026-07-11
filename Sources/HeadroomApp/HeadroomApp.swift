@@ -83,6 +83,8 @@ struct HeadroomApp: App {
         MenuBarExtra {
             MenuContent(model: model)
                 .task { model.start() }
+                .onAppear { model.noteMenuOpened() }   // freshen on look + drive adaptive cadence
+                .preferredColorScheme(model.prefs.appearance.scheme)
         } label: {
             // The entire label is ONE pre-composited NSImage (model.menuBarImage), rebuilt in
             // AppModel.recomputeMenuBar on every refresh and every glyph-pref change. Read it
@@ -98,12 +100,14 @@ struct HeadroomApp: App {
         Window("Log in", id: "login") {
             LoginHost(model: model)
                 .frame(minWidth: 520, minHeight: 640)
+                .preferredColorScheme(model.prefs.appearance.scheme)
         }
         .defaultSize(width: 560, height: 720)
 
         Window("Usage History", id: "history") {
             HistoryView(model: model)
                 .frame(minWidth: 560, minHeight: 440)
+                .preferredColorScheme(model.prefs.appearance.scheme)
         }
         .defaultSize(width: 780, height: 600)
         .windowResizability(.contentMinSize)
@@ -115,6 +119,7 @@ struct HeadroomApp: App {
         // sets only a minimum, no fixed lock.
         Window("Settings", id: "settings") {
             SettingsView(model: model)
+                .preferredColorScheme(model.prefs.appearance.scheme)
         }
         .defaultSize(width: 460, height: 520)
         .windowResizability(.contentMinSize)
