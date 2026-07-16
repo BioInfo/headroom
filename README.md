@@ -4,7 +4,7 @@ A native macOS menu-bar app that shows how much of your AI coding subscriptions 
 
 ![Headroom in the menu bar](assets/menubar.png)
 
-Claude, Codex, GLM (z.ai), MiniMax, and Kimi each have their own usage dashboard buried in their own site. Headroom reads the authoritative meter from each one and puts the remaining headroom, plus reset countdowns, in your menu bar. It reads each provider's *own* quota, not a gateway estimate or a cost guess.
+Claude, Codex, Grok, GLM (z.ai), MiniMax, and Kimi each have their own usage dashboard buried in their own site. Headroom reads the authoritative meter from each one and puts the remaining headroom, plus reset countdowns, in your menu bar. It reads each provider's *own* quota, not a gateway estimate or a cost guess.
 
 ![The popover, light and dark](assets/popover.png)
 
@@ -21,6 +21,7 @@ All providers are optional and toggle on/off in Settings. The default set works 
 | **MiniMax** | Coding-plan token windows | Paste your coding-plan key once. |
 | **GLM (z.ai)** | Coding-plan prompt + token limits | A key, or log in once in a browser window. |
 | **Kimi** | Coding-plan quota (5h + plan window) | Log in once in a browser window. |
+| **Grok** | SuperGrok / Grok Build weekly credit allowance | None. Reads the Grok CLI's own local token. |
 
 Don't see a tool you pay for? **[Request a provider](https://github.com/BioInfo/headroom/issues/new?template=provider-request.yml).**
 

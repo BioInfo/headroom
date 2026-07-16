@@ -50,8 +50,8 @@ private let grokBillingJSON = #"""
     try? Data(json.utf8).write(to: p)
     defer { try? FileManager.default.removeItem(at: dir) }
 
-    #expect(GrokCollector.readToken(p) == "grok-oat-fixture")
-    #expect(GrokCollector.readToken(dir.appendingPathComponent("missing.json")) == nil)
+    #expect(GrokCollector.readEntry(p)?.entry.key == "grok-oat-fixture")
+    #expect(GrokCollector.readEntry(dir.appendingPathComponent("missing.json")) == nil)
 }
 
 @Test func grokEmptyOrMissingCreditsYieldsNoMeter() throws {

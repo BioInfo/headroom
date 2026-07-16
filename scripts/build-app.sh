@@ -12,7 +12,7 @@ cd "$(dirname "$0")/.."
 
 APP="Headroom.app"
 BUNDLE_ID="io.rundatarun.headroom"
-VERSION="${HEADROOM_VERSION:-1.4.0}"
+VERSION="${HEADROOM_VERSION:-1.5.0}"
 EXE="HeadroomApp"
 CONFIG="${1:-release}"
 

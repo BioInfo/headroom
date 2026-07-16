@@ -59,7 +59,8 @@ public final class ZaiCollector: NSObject, Collector {
       const j = await r.json();
       return JSON.stringify({ ok:true, status:r.status, level:j?.data?.level,
         limits:(j?.data?.limits||[]).map(l => ({ type:l.type, usage:l.usage,
-          remaining:l.remaining, percentage:l.percentage, nextResetTime:l.nextResetTime })) });
+          remaining:l.remaining, percentage:l.percentage, nextResetTime:l.nextResetTime,
+          unit:l.unit, number:l.number, currentValue:l.currentValue })) });
     } catch (e) { return JSON.stringify({ ok:false, reason:String(e) }); }
     """
 
@@ -133,22 +134,45 @@ public final class ZaiCollector: NSObject, Collector {
         let remaining: Double?
         let percentage: Double?
         let nextResetTime: Double?
+        let unit: Int?          // window unit (z.ai's encoding: 3 = hour, 5 = month)
+        let number: Int?        // window length in `unit`s — number 5 + unit 3 = z.ai's "5 Hours Quota"
+        let currentValue: Double?   // amount actually used (TIME_LIMIT: requests used out of `usage` cap)
 
         var asMetric: Metric? {
             switch type {
-            case "TIME_LIMIT":
-                return Metric(label: "Prompt window", used: usage, limit: usageLimit,
-                              percentUsed: percentage, unit: .requests,
-                              resetAt: dateFromEpochMillis(nextResetTime))
             case "TOKENS_LIMIT":
-                return Metric(label: "Token budget", percentUsed: percentage, unit: .tokens,
-                              resetAt: dateFromEpochMillis(nextResetTime))
+                // z.ai's "5 Hours Quota" — the rolling coding-token window, reported as a percent.
+                return Metric(label: Self.windowLabel(number, unit), percentUsed: percentage,
+                              unit: .percent, resetAt: dateFromEpochMillis(nextResetTime),
+                              windowDuration: Self.windowSeconds(number, unit))
+            case "TIME_LIMIT":
+                // z.ai's "Monthly Web Search / Reader / Zread Quota" — a request count out of `usage`.
+                return Metric(label: "Web search", used: currentValue, limit: usage,
+                              percentUsed: percentage, unit: .requests,
+                              resetAt: dateFromEpochMillis(nextResetTime),
+                              windowDuration: Self.windowSeconds(number, unit))
             default:
                 return nil
             }
         }
-        // z.ai gives `usage` (the cap) + `remaining`; derive the limit when both present.
-        private var usageLimit: Double? { usage }
+
+        /// z.ai encodes a window as (number × unit). Known units: 3 = hour, 5 = month
+        /// (2 = minute, 4 = day by extension). Returns seconds, or nil if the unit is unknown.
+        static func windowSeconds(_ number: Int?, _ unit: Int?) -> TimeInterval? {
+            guard let number, let unit,
+                  let per = [2: 60.0, 3: 3600.0, 4: 86400.0, 5: 2_629_800.0][unit] else { return nil }
+            return per * Double(number)
+        }
+        static func windowLabel(_ number: Int?, _ unit: Int?) -> String {
+            guard let number, let unit else { return "Usage" }
+            switch unit {
+            case 2:  return "\(number)m window"
+            case 3:  return "\(number)h window"     // "5h window"
+            case 4:  return "\(number)d window"
+            case 5:  return number == 1 ? "Monthly" : "\(number)mo window"
+            default: return "Usage"
+            }
+        }
     }
 
     // MARK: - webview plumbing

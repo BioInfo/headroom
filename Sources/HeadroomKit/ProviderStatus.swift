@@ -40,7 +40,7 @@ public enum ProviderStatus {
     /// The Statuspage status.json URL for a provider, or nil if it publishes none.
     public static func statusURL(for provider: String) -> URL? {
         switch provider {
-        case "claude": URL(string: "https://status.claude.com/api/v2/status.json")  // status.anthropic.com 302s here
+        case "claude", "claude-jands": URL(string: "https://status.claude.com/api/v2/status.json")  // status.anthropic.com 302s here
         case "codex":  URL(string: "https://status.openai.com/api/v2/status.json")
         default:       nil   // minimax / zai / kimi: no public status page
         }

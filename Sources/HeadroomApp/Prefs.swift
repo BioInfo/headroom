@@ -83,11 +83,11 @@ final class Prefs {
     static let shared = Prefs()
 
     /// Every provider Headroom knows about, in display order.
-    static let allProviderIDs = ["claude", "codex", "minimax", "zai", "kimi", "grok"]
+    static let allProviderIDs = ["claude", "claude-jands", "codex", "minimax", "zai", "kimi", "grok"]
     /// On by default: every provider Headroom knows about. Local-creds ones (Claude/Codex)
     /// work with zero setup; key/token ones (MiniMax/GLM/Kimi) show a one-line "add a key"
     /// prompt until pasted — the discoverable funnel, consistent across all paste providers.
-    static let defaultEnabled: Set<String> = ["claude", "codex", "minimax", "zai", "kimi", "grok"]
+    static let defaultEnabled: Set<String> = ["claude", "claude-jands", "codex", "minimax", "zai", "kimi", "grok"]
 
     @ObservationIgnored private let d = UserDefaults.standard
 
@@ -157,6 +157,15 @@ final class Prefs {
         showPeakHours = d.bool(forKey: "showPeakHours")                       // default false (opt-in)
         peakHoursFlame = (d.object(forKey: "peakHoursFlame") as? Bool) ?? true
         autoUpdate = (d.object(forKey: "autoUpdate") as? Bool) ?? true
+
+        // One-time: turn on the second Claude meter for existing installs (new installs get it
+        // via defaultEnabled). Runs after all stored props are initialized; didSet doesn't fire in
+        // init, so persist explicitly. Runs once, so a later manual disable sticks.
+        if !d.bool(forKey: "migratedClaudeJands") {
+            enabledProviders.insert("claude-jands")
+            d.set(Array(enabledProviders), forKey: "enabledProviders")
+            d.set(true, forKey: "migratedClaudeJands")
+        }
     }
 
     /// The scheme a view should skin with: the pinned appearance, or the passed system
@@ -174,7 +183,8 @@ final class Prefs {
 
     static func displayName(_ id: String) -> String {
         switch id {
-        case "claude":  "Claude"
+        case "claude":       "Claude"
+        case "claude-jands": "Claude (J&S)"
         case "codex":   "Codex"
         case "minimax": "MiniMax"
         case "zai":     "GLM (z.ai)"
@@ -188,7 +198,7 @@ final class Prefs {
     enum Kind { case local, key, web, login }
     static func kind(_ id: String) -> Kind {
         switch id {
-        case "claude", "codex", "grok": .local  // read local creds/logs, zero setup
+        case "claude", "claude-jands", "codex", "grok": .local  // read local creds/logs, zero setup
         case "minimax":         .key          // paste-once API key
         case "kimi":            .key          // paste-once session token (no API key exists)
         case "zai":             .web          // pasted key (primary) OR browser login (fallback)

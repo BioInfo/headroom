@@ -14,7 +14,8 @@ enum ProviderInfo {
     static func dashboardURL(_ id: String) -> URL? {
         let s: String?
         switch id {
-        case "claude":  s = "https://claude.ai/settings/usage"
+        case "claude":       s = "https://claude.ai/settings/usage"
+        case "claude-jands": s = "https://claude.ai/settings/usage"
         case "codex":   s = "https://chatgpt.com/codex/settings/usage"
         case "minimax": s = "https://platform.minimax.io/user-center/basic-information"
         case "zai":     s = "https://z.ai/manage-apikey/coding-plan/personal/usage"
@@ -28,7 +29,8 @@ enum ProviderInfo {
     /// Monogram letter for the badge.
     static func letter(_ id: String) -> String {
         switch id {
-        case "claude":  "C"
+        case "claude":       "C"
+        case "claude-jands": "J"   // J&S — distinct monogram from Claude's C
         case "codex":   "X"   // disambiguates from Claude's C (Code-X)
         case "minimax": "M"
         case "zai":     "G"   // GLM
@@ -42,7 +44,8 @@ enum ProviderInfo {
     /// stay in-palette while remaining individually recognizable.
     static func tierColor(_ id: String, _ skin: Skin) -> Color {
         switch id {
-        case "claude":  skin.ramp(.pressing)   // terracotta
+        case "claude":       skin.ramp(.pressing)   // terracotta
+        case "claude-jands": skin.ramp(.pressing)   // same Claude terracotta; the "J" monogram sets it apart
         case "codex":   skin.ramp(.healthy)    // olive
         case "minimax": skin.ramp(.critical)   // rust
         case "zai":     skin.ramp(.runaway)    // aubergine

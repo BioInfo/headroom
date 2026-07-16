@@ -82,19 +82,116 @@ final class AppModel {
     // primary path is a pasted coding-plan key. Kimi/MiniMax are stateless (key/token paste).
     let zai = ZaiCollector()
 
+    // MARK: - Claude multi-account (two labeled meters + fast switch via `claude-switch`)
+
+    /// Claude Code stores creds in ONE slot; `claude-switch` stashes a copy of each account
+    /// under its own Headroom-owned Keychain item and records which is live in a pointer file.
+    static let claudeLiveService = "Claude Code-credentials"
+    static let claudeStashPrefix = "Headroom-claude-acct-"
+
+    /// Which Claude account is in the live slot, per the `claude-switch` pointer file.
+    /// Defaults to the primary if unset — matches legacy behavior (one Claude card that read
+    /// whatever account was logged in).
+    var activeClaudeLabel: String {
+        let p = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude/.headroom-active-claude")
+        let s = (try? String(contentsOf: p, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (s?.isEmpty == false) ? s! : "personal"
+    }
+
+    /// Build a ClaudeCollector for one account. The ACTIVE account reads Claude Code's live
+    /// slot (the CLI keeps it fresh); an INACTIVE account reads its Headroom-owned stash
+    /// (frozen at last capture → token expires → the card shows last-known, dimmed).
+    private func claudeCollector(id: String, display: String, label: String, active: String) -> ClaudeCollector {
+        let isActive = (label == active)
+        return ClaudeCollector(
+            id: id, displayName: display,
+            credentialsPath: isActive ? nil : URL(fileURLWithPath: "/dev/null"),
+            keychainService: isActive ? Self.claudeLiveService : Self.claudeStashPrefix + label,
+            includeExtraUsage: prefs.showClaudeExtraUsage)
+    }
+
     /// The active collectors, in display order, filtered to the providers the user has
     /// enabled. Stateless ones (Claude/Codex/MiniMax/Kimi) are rebuilt each call so they
-    /// pick up pref changes (e.g. Claude's extra-usage opt-in) with no restart.
+    /// pick up pref changes (e.g. Claude's extra-usage opt-in, or an account switch) with no restart.
     private var collectors: [any Collector] {
-        let all: [any Collector] = [
-            ClaudeCollector(includeExtraUsage: prefs.showClaudeExtraUsage),
+        let active = activeClaudeLabel
+        var all: [any Collector] = [
+            claudeCollector(id: "claude", display: "Claude", label: "personal", active: active),
             CodexCollector(),
             MiniMaxCollector(),
             zai,
             KimiCollector(),
             GrokCollector(),
         ]
+        // Show the second Claude meter only once it has a stash (or is the active account),
+        // so pre-bootstrap Headroom looks exactly as before (a single Claude card).
+        if active == "business" || LocalKey.stored(service: Self.claudeStashPrefix + "business") != nil {
+            all.insert(claudeCollector(id: "claude-jands", display: "Claude (J&S)", label: "business", active: active), at: 1)
+        }
         return all.filter { prefs.isEnabled($0.id) }
+    }
+
+    /// Flip the live Claude account via the `claude-switch` CLI, then refresh so the two
+    /// meters swap their live/last-known roles. Takes effect for NEW `claude` sessions.
+    func switchClaudeAccount(_ label: String) {
+        let script = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("scripts/claude-switch").path
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/bash")
+        p.arguments = [script, label]
+        p.standardOutput = Pipe(); p.standardError = Pipe()
+        do { try p.run(); p.waitUntilExit() } catch { return }
+        Task { await refresh() }
+    }
+
+    /// True once both Claude meters are present (i.e. the J&S account has been captured) —
+    /// gates the in-card account switcher, which only makes sense with two accounts.
+    var hasBothClaudeMeters: Bool {
+        usages.contains { $0.provider == "claude" } && usages.contains { $0.provider == "claude-jands" }
+    }
+
+    /// For a Claude card: the switch label + whether it's the live account, or nil for
+    /// non-Claude cards / before the second account exists. Drives the card's Switch/Active chip.
+    func claudeSwitchInfo(for id: String) -> (label: String, isActive: Bool)? {
+        guard hasBothClaudeMeters else { return nil }
+        let label: String
+        switch id {
+        case "claude":       label = "personal"
+        case "claude-jands": label = "business"
+        default:             return nil
+        }
+        return (label, label == activeClaudeLabel)
+    }
+
+    // MARK: - last-good persistence
+
+    /// Where per-provider last-good snapshots live (real ~/Library — the app is unsandboxed,
+    /// same as history.json).
+    private var lastGoodDir: URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Headroom/lastgood", isDirectory: true)
+        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        return base
+    }
+
+    /// Persist a good reading so it survives relaunch — the inactive Claude account (whose
+    /// stash token has expired) then shows its last real gauges instead of "No meters reported".
+    private func persistLastGood(_ u: ProviderUsage) {
+        guard let data = try? JSONEncoder().encode(u) else { return }
+        try? data.write(to: lastGoodDir.appendingPathComponent("\(u.id).json"), options: .atomic)
+    }
+
+    /// Load persisted last-good readings into memory before the first poll, so a just-launched
+    /// or inactive meter falls back to last-known rather than an empty card.
+    private func rehydrateLastGood() {
+        guard let files = try? FileManager.default.contentsOfDirectory(at: lastGoodDir, includingPropertiesForKeys: nil) else { return }
+        for f in files where f.pathExtension == "json" {
+            if let data = try? Data(contentsOf: f),
+               let u = try? JSONDecoder().decode(ProviderUsage.self, from: data) {
+                lastGood[u.id] = u
+            }
+        }
     }
 
     /// The WKWebView to host for a given provider's in-app login, if it has one. Only z.ai
@@ -148,6 +245,7 @@ final class AppModel {
         recomputeMenuBar()   // re-seed the glyph state before the first refresh lands
         observeWake()
         warmHistory()   // precompute the History window's data so it opens instantly
+        rehydrateLastGood()   // seed last-known so the first poll of an inactive account isn't a blank card
         refreshTask = Task { [weak self] in
             var first = true
             while !Task.isCancelled {
@@ -239,10 +337,20 @@ final class AppModel {
                 let fresh = try await c.collect()
                 if fresh.status == .ok, !fresh.metrics.isEmpty {
                     lastGood[c.id] = fresh          // remember good readings
+                    persistLastGood(fresh)          // survive relaunch → inactive meter shows last-known
+                    current[c.id] = fresh
+                } else if fresh.status == .needsLogin, lastGood[c.id] == nil {
+                    current[c.id] = fresh           // genuinely unauthenticated → show the login/paste UI
+                } else if var stale = lastGood[c.id] {
+                    // A non-ok / empty reading (a 401 during Claude token rotation, or an inactive
+                    // account's expired stash) must NOT blank the card — re-show last-good, dimmed.
+                    stale.status = .stale
+                    current[c.id] = stale
+                } else {
+                    current[c.id] = fresh           // no prior good reading — show whatever we got
                 }
-                current[c.id] = fresh
             } catch {
-                // Don't blank the card: re-show the last good reading, dimmed + dated.
+                // Network error thrown: same fallback.
                 if var stale = lastGood[c.id] {
                     stale.status = .stale
                     current[c.id] = stale

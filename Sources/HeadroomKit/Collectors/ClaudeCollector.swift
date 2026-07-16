@@ -22,8 +22,8 @@ import Foundation
 /// if it has expired and the CLI hasn't refreshed it, the call 401s and we report
 /// `.stale`. We never store, log, or commit the token.
 public struct ClaudeCollector: Collector {
-    public let id = "claude"
-    public let displayName = "Claude"
+    public let id: String
+    public let displayName: String
 
     private let usageURL = URL(string: "https://api.anthropic.com/api/oauth/usage")!
     private let credentialsPath: URL
@@ -34,10 +34,14 @@ public struct ClaudeCollector: Collector {
     /// user opts in via Settings. See docs/ROADMAP Phase 5.
     private let includeExtraUsage: Bool
 
-    public init(credentialsPath: URL? = nil,
+    public init(id: String = "claude",
+                displayName: String = "Claude",
+                credentialsPath: URL? = nil,
                 keychainService: String = "Claude Code-credentials",
                 includeExtraUsage: Bool = false,
                 session: URLSession = .shared) {
+        self.id = id
+        self.displayName = displayName
         self.credentialsPath = credentialsPath
             ?? FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent(".claude/.credentials.json")

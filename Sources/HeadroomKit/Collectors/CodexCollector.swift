@@ -77,12 +77,12 @@ public struct CodexCollector: Collector {
         let plan_type: String?
         let rate_limit: RateLimit?
 
+        // Label each present window by its own `limit_window_seconds`, not by position:
+        // OpenAI now returns the WEEKLY cap as `primary_window` (604800s) with
+        // `secondary_window` null, so a fixed primary="5h" mislabeled the weekly and hid it.
         var metrics: [Metric] {
             guard let rl = rate_limit else { return [] }
-            return [
-                rl.primary_window?.metric(label: "5h window"),
-                rl.secondary_window?.metric(label: "Weekly"),
-            ].compactMap { $0 }
+            return [rl.primary_window, rl.secondary_window].compactMap { $0?.metric() }
         }
     }
     struct RateLimit: Decodable {
@@ -95,10 +95,22 @@ public struct CodexCollector: Collector {
         let reset_after_seconds: Double?   // relative fallback
         let limit_window_seconds: Double?  // window length (primary ≈ 18000, secondary ≈ 604800)
 
-        func metric(label: String) -> Metric? {
+        func metric() -> Metric? {
             guard let used_percent else { return nil }
-            return Metric(label: label, percentUsed: used_percent, unit: .percent,
+            return Metric(label: Self.label(forWindowSeconds: limit_window_seconds),
+                          percentUsed: used_percent, unit: .percent,
                           resetAt: resetDate, windowDuration: limit_window_seconds)
+        }
+        /// Name the window from its length, so it reads right whichever slot the server puts
+        /// it in (18000 = 5h, 604800 = weekly; else a sensible h/d fallback).
+        static func label(forWindowSeconds s: Double?) -> String {
+            switch s {
+            case 18000:  return "5h window"
+            case 604800: return "Weekly"
+            case .some(let v) where v >= 86400: return "\(Int(v / 86400))d window"
+            case .some(let v): return "\(Int(v / 3600))h window"
+            case .none:  return "Usage"
+            }
         }
         private var resetDate: Date? {
             if let reset_at { return Date(timeIntervalSince1970: reset_at) }

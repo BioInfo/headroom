@@ -40,8 +40,8 @@ public struct GrokCollector: Collector {
     }
 
     public func collect() async throws -> ProviderUsage {
-        guard let token = Self.readToken(authPath), !token.isEmpty else {
-            return needsLogin()   // not signed in → run `grok` to authenticate.
+        guard let token = await Self.resolveValidToken(authPath), !token.isEmpty else {
+            return needsLogin()   // no token and no refresh path → run `grok` to authenticate.
         }
 
         var req = URLRequest(url: usageURL)
@@ -65,20 +65,78 @@ public struct GrokCollector: Collector {
                              metrics: resp.config?.metrics ?? [], status: .ok)
     }
 
-    // MARK: - auth.json (the OIDC bearer under the single `https://auth.x.ai::…` key)
+    // MARK: - auth.json + OIDC refresh
+    //
+    // auth.json is `{ "https://auth.x.ai::<client_id>": { key, refresh_token, expires_at,
+    // oidc_client_id, … } }`. `key` is the bearer, valid ~6h. The grok CLI only refreshes it
+    // when you run `grok`, so between runs it goes stale and the meter breaks. We refresh it
+    // ourselves from the refresh token (x.ai's standard OIDC endpoint) and write the result
+    // back — x.ai ROTATES the refresh token, so persisting it keeps both us and the CLI working.
 
-    /// auth.json is `{ "https://auth.x.ai::<client_id>": { "key": <bearer>, … } }` — a
-    /// single provider entry whose `key` is the access token. We match structurally (the
-    /// first entry carrying a non-empty `key`) rather than hard-coding the client_id.
-    static func readToken(_ path: URL) -> String? {
+    struct Entry { let key: String; let refreshToken: String?; let expiresAt: String?; let clientId: String? }
+
+    /// The single provider entry (first one carrying a non-empty `key`) + its dict key.
+    static func readEntry(_ path: URL) -> (dictKey: String, entry: Entry)? {
         guard let bytes = try? Data(contentsOf: path),
-              let obj = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any]
-        else { return nil }
-        for (_, v) in obj {
-            if let entry = v as? [String: Any],
-               let key = entry["key"] as? String, !key.isEmpty { return key }
+              let obj = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { return nil }
+        for (k, v) in obj {
+            if let e = v as? [String: Any], let key = e["key"] as? String, !key.isEmpty {
+                return (k, Entry(key: key, refreshToken: e["refresh_token"] as? String,
+                                 expiresAt: e["expires_at"] as? String, clientId: e["oidc_client_id"] as? String))
+            }
         }
         return nil
+    }
+
+    /// A currently-valid access token: the stored `key` while unexpired, else a fresh one minted
+    /// from the refresh token and written back to auth.json. nil only if there's no entry at all.
+    static func resolveValidToken(_ path: URL) async -> String? {
+        guard let (dictKey, entry) = readEntry(path) else { return nil }
+        if let exp = parseISO(entry.expiresAt), exp > Date().addingTimeInterval(120) { return entry.key }
+        guard let rt = entry.refreshToken, let cid = entry.clientId,
+              let fresh = await refresh(refreshToken: rt, clientId: cid) else {
+            return entry.key   // no refresh path / refresh failed → try the stored key; a dead one 401s.
+        }
+        writeBack(path: path, dictKey: dictKey, fresh: fresh)
+        return fresh.accessToken
+    }
+
+    struct Fresh { let accessToken: String; let refreshToken: String?; let expiresIn: Double? }
+
+    /// POST the refresh grant to x.ai's OIDC token endpoint. nil on any failure.
+    static func refresh(refreshToken: String, clientId: String) async -> Fresh? {
+        func enc(_ s: String) -> String {
+            let allowed = CharacterSet(charactersIn:
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+            return s.addingPercentEncoding(withAllowedCharacters: allowed) ?? s
+        }
+        var req = URLRequest(url: URL(string: "https://auth.x.ai/oauth2/token")!)
+        req.httpMethod = "POST"
+        req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        req.setValue("application/json", forHTTPHeaderField: "accept")
+        req.httpBody = Data("grant_type=refresh_token&refresh_token=\(enc(refreshToken))&client_id=\(enc(clientId))".utf8)
+        guard let (data, resp) = try? await URLSession.shared.data(for: req),
+              (resp as? HTTPURLResponse)?.statusCode == 200,
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let at = obj["access_token"] as? String else { return nil }
+        return Fresh(accessToken: at, refreshToken: obj["refresh_token"] as? String,
+                     expiresIn: obj["expires_in"] as? Double)
+    }
+
+    /// Persist the refreshed token back into auth.json, preserving every other field. Best-effort.
+    static func writeBack(path: URL, dictKey: String, fresh: Fresh) {
+        guard let bytes = try? Data(contentsOf: path),
+              var obj = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any],
+              var entry = obj[dictKey] as? [String: Any] else { return }
+        entry["key"] = fresh.accessToken
+        if let rt = fresh.refreshToken { entry["refresh_token"] = rt }
+        if let ein = fresh.expiresIn {
+            let fmt = ISO8601DateFormatter(); fmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            entry["expires_at"] = fmt.string(from: Date().addingTimeInterval(ein))
+        }
+        obj[dictKey] = entry
+        guard let out = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys]) else { return }
+        try? out.write(to: path, options: .atomic)
     }
 
     // MARK: - response shape (cli-chat-proxy.grok.com/v1/billing?format=credits)

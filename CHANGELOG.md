@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-07-15
+
+### Fixed
+- **Codex weekly window.** OpenAI moved the weekly cap into the primary rate-limit window (and stopped sending a secondary one), so Headroom was labeling the weekly as "5h window" and never showing the weekly. Windows are now labeled by their actual length (5h vs weekly), so the correct one shows.
+- **Grok meter no longer goes stale between sessions.** The Grok token in `~/.grok/auth.json` lasts about six hours and only refreshes when you run the `grok` CLI, so the meter broke whenever you hadn't used Grok in a while. Headroom now refreshes the token itself via x.ai's OIDC endpoint and writes it back, so the weekly meter stays live.
+- **GLM (z.ai) meter labels.** The 5-hour coding quota was mislabeled "Token budget" and the monthly web-search/reader quota "Prompt window." They now read "5h window" and "Web search," with the correct reset windows, decoded from z.ai's own window fields.
+- **Claude card no longer blanks on a transient error.** A brief 401 during token rotation could clear the Claude card to "No meters reported"; it now keeps the last good reading (dimmed), the same way every other transient failure is handled, and persists it across relaunches.
+
 ## [1.4.0] - 2026-07-11
 
 ### Added

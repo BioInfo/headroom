@@ -88,12 +88,14 @@ struct MenuContent: View {
                              refreshing: model.isRefreshing,
                              canWebLogin: model.loginWebView(for: usage.provider) != nil,
                              canKey: model.keyService(for: usage.provider) != nil,
-                             peak: model.peakHoursActive && usage.provider == "claude",
+                             peak: model.peakHoursActive && usage.provider.hasPrefix("claude"),
+                             claudeSwitch: model.claudeSwitchInfo(for: usage.provider),
                              onLogin: {
                     model.loginTargetID = usage.provider
                     surface("login")
                 },
-                             onSettings: { openSettings() })
+                             onSettings: { openSettings() },
+                             onSwitchClaude: { model.switchClaudeAccount($0) })
             }
 
             Rectangle().fill(skin.edge).frame(height: 1)
@@ -186,8 +188,13 @@ struct ProviderCard: View {
     /// Claude's peak-hours window is active (and the user opted in) — warm the card so it
     /// reads as "busier than usual right now," matching the menu-bar flame.
     var peak: Bool = false
+    /// For a Claude account card: the switch label + whether it's the live account. nil for
+    /// other cards (and before the second Claude account exists). Drives the header Active/Switch chip.
+    var claudeSwitch: (label: String, isActive: Bool)? = nil
     var onLogin: () -> Void
     var onSettings: () -> Void = {}
+    /// Flip the live Claude account (menu-bar switch, shells `claude-switch`). Passed only for Claude cards.
+    var onSwitchClaude: ((String) -> Void)? = nil
 
     /// Stale data, or a refresh in flight over a still-shown reading: dim the meters so
     /// the number reads as "not live right now" without the card flashing to empty.
@@ -206,6 +213,21 @@ struct ProviderCard: View {
                     .font(.caption2.weight(.bold)).foregroundStyle(skin.bg2)
                     .padding(.horizontal, 5).padding(.vertical, 1.5)
                     .background(skin.clay, in: Capsule())
+            }
+            if let cs = claudeSwitch {
+                if cs.isActive {
+                    Text("ACTIVE")
+                        .font(.caption2.weight(.bold)).foregroundStyle(skin.ramp(.healthy))
+                        .padding(.horizontal, 5).padding(.vertical, 1.5)
+                        .background(skin.ramp(.healthy).opacity(0.15), in: Capsule())
+                        .help("This is the live Claude account for the CLI")
+                } else {
+                    Button { onSwitchClaude?(cs.label) } label: {
+                        Text("Switch").font(.caption2.weight(.semibold))
+                    }
+                    .buttonStyle(.borderless).tint(skin.clay)
+                    .help("Make this the active Claude account for the Claude Code CLI (takes effect for new sessions)")
+                }
             }
             if peak {
                 Image(systemName: "flame.fill")
