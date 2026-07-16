@@ -114,19 +114,53 @@ public enum ClaudeAccounts {
         }
     }
 
-    /// Update the live slot IN PLACE (-U preserves the item's access ACL, so Claude Code
-    /// keeps reading it without a Keychain prompt).
+    /// Update the live slot IN PLACE. `SecItemUpdate` preserves the item's existing ACL, so
+    /// Claude Code keeps reading it without a prompt of its own.
+    ///
+    /// In-process, not `/usr/bin/security`: macOS scopes Keychain trust to the *requesting
+    /// binary*, so every shell-out asked as a fresh, unrelated process and re-prompted —
+    /// three dialogs for one switch. As Headroom.app, one "Always Allow" is permanent.
+    /// It also keeps the token off argv, where `ps` could read it.
     @discardableResult private static func writeLive(_ blob: String) -> Bool {
-        security(["add-generic-password", "-s", liveService, "-a", NSUserName(), "-w", blob, "-U"]).ok
+        KeychainWrite.upsert(service: liveService, account: NSUserName(), value: blob).isOK
     }
-    /// Write a stash, granting /usr/bin/security itself access (-T) so future reads/updates
-    /// from this tool don't prompt.
     @discardableResult private static func writeStash(_ label: String, _ blob: String) -> Bool {
-        security(["add-generic-password", "-s", stashPrefix + label, "-a", NSUserName(),
-                  "-w", blob, "-U", "-T", "/usr/bin/security"]).ok
+        KeychainWrite.upsert(service: stashPrefix + label, account: NSUserName(), value: blob).isOK
     }
     @discardableResult private static func deleteStash(_ label: String) -> Bool {
-        security(["delete-generic-password", "-s", stashPrefix + label]).ok
+        KeychainWrite.delete(service: stashPrefix + label, account: NSUserName()).isOK
+    }
+
+    // MARK: - identity index (the pointer is a cache; `account.uuid` is the fact)
+
+    private static var indexURL: URL { home.appendingPathComponent(".claude/.headroom-claude-accounts.json") }
+
+    public static func loadIndex() -> ClaudeAccountIndex {
+        guard let data = try? Data(contentsOf: indexURL),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            // First run (or pre-index install): seed the active label from the legacy pointer
+            // so an existing setup keeps working. Identities fill in as accounts are verified.
+            return ClaudeAccountIndex(activeLabel: activeLabel())
+        }
+        return ClaudeAccountIndex.deserialize(obj)
+    }
+
+    public static func saveIndex(_ idx: ClaudeAccountIndex) {
+        guard let data = try? JSONSerialization.data(withJSONObject: idx.serialized(),
+                                                     options: [.prettyPrinted, .sortedKeys]) else { return }
+        try? data.write(to: indexURL, options: .atomic)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: indexURL.path)
+        // Keep the legacy pointer in step so `~/scripts/claude-switch` stays interoperable.
+        if let a = idx.activeLabel { setPointer(a) }
+    }
+
+    /// Resolve who a credential blob belongs to. Read-only and non-rotating, so it is always
+    /// safe to call. Returns nil when the blob's access token is expired or the network is
+    /// down — callers MUST treat nil as "unknown", never as "not that account".
+    public static func identify(blob: String) async -> ClaudeIdentity? {
+        guard let creds = ClaudeCreds.parse(blob) else { return nil }
+        if case .success(let id) = await ClaudeProfile.fetch(accessToken: creds.accessToken) { return id }
+        return nil
     }
 
     /// All stashed account labels, discovered from the login keychain (attribute list, not
@@ -172,11 +206,23 @@ public enum ClaudeAccounts {
 
     /// A read-only summary of the active account + every stash, for `headroom claude-accounts
     /// status` and diagnostics. Never prints a token.
-    public static func statusReport() -> String {
+    /// Reports the VERIFIED account behind each slot, not just the label — a label is a claim
+    /// and the whole class of bugs here came from believing it. An account whose access token
+    /// has expired is reported as unverifiable rather than assumed (we won't refresh it just
+    /// to look, since a refresh rotates).
+    public static func statusReport() async -> String {
         var lines: [String] = []
-        lines.append("active (pointer): \(activeLabel() ?? "<unset>")")
+        let idx = loadIndex()
+        lines.append("active (cached) : \(idx.activeLabel ?? activeLabel() ?? "<unset>")")
         if let live = readLive() {
+            let who = await identify(blob: live)?.summary() ?? "unverifiable (expired token or offline)"
             lines.append("live slot       : \(ClaudeCreds.parse(live)?.summary() ?? "INVALID")")
+            lines.append("live account    : \(who)")
+            if let liveID = await identify(blob: live), let owner = idx.label(forUUID: liveID.accountUUID) {
+                lines.append("live is stash   : \(owner)")
+            } else {
+                lines.append("live is stash   : <not saved under any name>")
+            }
         } else {
             lines.append("live slot       : <empty — not logged in>")
         }
@@ -186,17 +232,38 @@ public enum ClaudeAccounts {
         } else {
             for l in labels {
                 let s = readStash(l).flatMap(ClaudeCreds.parse)?.summary() ?? "INVALID"
+                let who = idx.accounts[l]?.email ?? idx.accounts[l]?.uuid ?? "unknown — run: headroom claude-accounts reconcile"
                 let padded = l.padding(toLength: max(l.count, 10), withPad: " ", startingAt: 0)
                 lines.append("stash \(padded) : \(s)")
+                lines.append("      \(padded) → \(who)")
             }
         }
         return lines.joined(separator: "\n")
     }
 
-    /// Stash the currently-logged-in account under `label` and mark it active. The label is
-    /// the live account (it's what's in the slot), so this also sets the pointer.
+    /// Bind every stash we can verify to its real `account.uuid`. Read-only and non-rotating:
+    /// a stash whose access token has already expired stays "unknown" rather than being
+    /// refreshed behind the user's back (a refresh rotates, and an unpersisted rotation
+    /// strands the account). Self-heals an index that predates this scheme.
     @discardableResult
-    public static func capture(label rawLabel: String) -> Result<String, OpError> {
+    public static func reconcile() async -> ClaudeAccountIndex {
+        var idx = loadIndex()
+        for label in listLabels() {
+            guard let blob = readStash(label) else { continue }
+            if let id = await identify(blob: blob) { idx.record(label: label, identity: id) }
+        }
+        if let live = readLive(), let liveID = await identify(blob: live),
+           let owner = idx.label(forUUID: liveID.accountUUID) {
+            idx.activeLabel = owner   // the pointer may disagree; the uuid wins
+        }
+        saveIndex(idx)
+        return idx
+    }
+
+    /// Stash the currently-logged-in account under `label` and mark it active, recording the
+    /// verified `account.uuid` so later capture-aways can route by identity instead of a claim.
+    @discardableResult
+    public static func capture(label rawLabel: String) async -> Result<String, OpError> {
         guard let label = sanitizeLabel(rawLabel) else {
             return .failure(OpError(message: "Enter a name (letters, digits, dashes)."))
         }
@@ -206,47 +273,118 @@ public enum ClaudeAccounts {
         guard let creds = ClaudeCreds.parse(blob) else {
             return .failure(OpError(message: "The live Claude slot isn't a valid credentials blob."))
         }
+        let identity = await identify(blob: blob)
+        var idx = loadIndex()
+        // Refuse to file this account under a second name — that's how a "personal" stash ends
+        // up holding the business account and one of the two silently becomes unreachable.
+        if let identity, let existing = idx.label(forUUID: identity.accountUUID), existing != label {
+            return .failure(OpError(message: "That account is already saved as “\(existing)” (\(identity.summary())). Rename it instead of saving it twice."))
+        }
         guard writeStash(label, blob), readStash(label) == blob else {
             return .failure(OpError(message: "Couldn't save the account to the Keychain."))
         }
-        setPointer(label)
-        return .success("Saved “\(label)” — \(creds.summary())")
+        if let identity { idx.record(label: label, identity: identity) }
+        idx.activeLabel = label
+        saveIndex(idx)
+        let who = identity?.summary() ?? creds.summary()
+        return .success("Saved “\(label)” — \(who)")
     }
 
-    /// Make `label` the live account: capture-away the current one first (preserve a rotated
-    /// refresh token), back up live, write the target into the live slot + cred file, verify.
+    /// Make `label` the live account.
+    ///
+    /// The order here is the whole fix, and every step is load-bearing:
+    ///  1. **Verify who is live** via `account.uuid` — never the pointer, which `/login`
+    ///     silently invalidates. Unknown ⇒ refuse; a blind capture-away overwrites a *different*
+    ///     account's credentials.
+    ///  2. **Capture-away by identity**, into the stash that actually holds that uuid.
+    ///  3. **Refresh the target before writing it.** A stash is a frozen copy of a rotating
+    ///     credential and is very likely already void — writing it into the live slot is what
+    ///     logged people out (replaying a rotated refresh token gets the family revoked).
+    ///  4. **Persist the rotation to the stash BEFORE the live write**, so a crash mid-switch
+    ///     can't strand the account with a token nobody recorded.
+    ///  5. Write live + cred mirror, verify by readback.
     @discardableResult
-    public static func switchTo(_ label: String) -> Result<String, OpError> {
-        guard let target = readStash(label), ClaudeCreds.parse(target) != nil else {
+    public static func switchTo(_ label: String) async -> Result<String, OpError> {
+        guard let targetBlob = readStash(label), ClaudeCreds.parse(targetBlob) != nil else {
             return .failure(OpError(message: "No saved account “\(label)”."))
         }
-        if let live = readLive() {
+        var idx = loadIndex()
+
+        // 1-2. Identify the live account, then file it where it actually belongs.
+        if let live = readLive(), ClaudeCreds.parse(live) != nil {
             backupLive(live)
-            if let cur = activeLabel(), ClaudeCreds.parse(live) != nil {
-                _ = writeStash(cur, live)   // capture-away; best-effort (a bad blob just isn't stashed)
+            guard let liveID = await identify(blob: live) else {
+                return .failure(OpError(message: "Couldn't confirm which account is logged in right now (expired token, or no network). Not switching — guessing here could overwrite another saved account's credentials."))
+            }
+            if let target = idx.accounts[label], target.uuid == liveID.accountUUID {
+                idx.activeLabel = label; saveIndex(idx)
+                return .success("Already signed in as “\(label)” (\(liveID.summary())).")
+            }
+            // An install that predates the index has labels but no uuids, so nothing resolves
+            // yet. Bind them once, on demand, rather than making an existing multi-account user
+            // re-save every account to earn a switch. Read-only, so it can't do harm.
+            if idx.label(forUUID: liveID.accountUUID) == nil, idx.accounts.isEmpty {
+                idx = await reconcile()
+            }
+            if let awayLabel = idx.label(forUUID: liveID.accountUUID) {
+                if writeStash(awayLabel, live) { idx.record(label: awayLabel, identity: liveID) }
+            } else {
+                return .failure(OpError(message: "The account signed in right now (\(liveID.summary())) isn't saved yet. Save it first (Settings → Claude accounts → Add current account), or switching would lose its sign-in."))
             }
         }
-        guard writeLive(target) else {
+
+        // 3. Refresh the target — never write a frozen token into the live slot.
+        guard let targetCreds = ClaudeCreds.parse(targetBlob),
+              let targetRefresh = targetCreds.refreshToken else {
+            return .failure(OpError(message: "Saved account “\(label)” has no refresh token — sign in again with `claude` and re-save it."))
+        }
+        let fresh: ClaudeRefresh.Fresh
+        switch await ClaudeRefresh.refresh(refreshToken: targetRefresh) {
+        case .success(let f):
+            fresh = f
+        case .failure(.revoked):
+            return .failure(OpError(message: "“\(label)” has been signed out (its saved token is no longer valid). Run `claude` and sign in to that account, then save it again."))
+        case .failure(let e):
+            return .failure(OpError(message: "Couldn't refresh “\(label)” (\(e)). Check your connection and try again — nothing was changed."))
+        }
+        guard let freshBlob = ClaudeRefresh.apply(fresh, to: targetBlob) else {
+            return .failure(OpError(message: "Couldn't apply the refreshed token to “\(label)”."))
+        }
+
+        // 4. Persist the rotation first — the old refresh token is already void server-side.
+        guard writeStash(label, freshBlob) else {
+            return .failure(OpError(message: "Couldn't save the refreshed token for “\(label)” — not switching, so nothing is lost."))
+        }
+        idx.record(label: label, identity: idx.accounts[label].map {
+            ClaudeIdentity(accountUUID: $0.uuid, email: $0.email, organizationName: $0.organizationName)
+        } ?? ClaudeIdentity(accountUUID: "unknown"))
+
+        // 5. Go live, and gate on the artifact.
+        guard writeLive(freshBlob) else {
             return .failure(OpError(message: "Couldn't write the live Keychain slot — try again."))
         }
-        writeCredFile(target)
-        guard readLive() == target else {
+        writeCredFile(freshBlob)
+        guard readLive() == freshBlob else {
             return .failure(OpError(message: "Live slot didn't update (Keychain readback mismatch)."))
         }
-        setPointer(label)
-        let summ = ClaudeCreds.parse(target)?.summary() ?? ""
-        return .success("Switched to “\(label)” — \(summ). Start a new `claude` session to use it.")
+        idx.activeLabel = label
+        saveIndex(idx)
+        let who = idx.accounts[label]?.email ?? label
+        return .success("Switched to “\(label)” (\(who)). Start a new `claude` session to use it.")
     }
 
     /// Delete a stash. Refuses the currently-active account (switch away first).
     @discardableResult
     public static func remove(_ label: String) -> Result<String, OpError> {
-        if activeLabel() == label {
+        var idx = loadIndex()
+        if (idx.activeLabel ?? activeLabel()) == label {
             return .failure(OpError(message: "“\(label)” is the active account — switch to another first."))
         }
         guard deleteStash(label) else {
             return .failure(OpError(message: "Couldn't remove “\(label)”."))
         }
+        idx.forget(label: label)
+        saveIndex(idx)
         return .success("Removed “\(label)”.")
     }
 }

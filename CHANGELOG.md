@@ -5,6 +5,17 @@ All notable changes to Headroom are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.1] - 2026-07-16
+
+### Fixed
+- **Switching Claude accounts could sign the account out.** Claude Code rotates its OAuth refresh token, so a saved account's stored credential goes stale on its own. Headroom wrote that stale credential straight into the live slot, and replaying a rotated refresh token gets the whole token family revoked — which signed you out of Claude Code rather than simply failing. Headroom now refreshes a saved account **before** it goes live, saves the rotated token first, and writes nothing at all unless a valid credential is in hand. If an account really has been signed out, you get a clear message instead of a broken session.
+- **Switching could file an account under the wrong name.** The credential itself carries no identity, so Headroom trusted a pointer file to know which account was live — and `/login` rewrites the live slot without touching that pointer. Once it drifted, saving the outgoing account could overwrite a *different* account's saved credential. Headroom now confirms identity against the account's own profile (`account.uuid`, which survives token rotation) and refuses to switch rather than guess. Saved accounts now show the real account email, so you can see which is which.
+- **Three Keychain password prompts per switch, every time.** macOS scopes Keychain trust to the requesting program, and Headroom was shelling out to `/usr/bin/security` for each write — a new program each time, so it asked again and "Always Allow" never stuck. Writes now happen inside Headroom itself: approve once, and it stays approved. Your token also no longer passes through a command line.
+- **The same account could appear as two cards** — one marked ACTIVE, one offering to switch to itself, both showing identical numbers — if the display refreshed mid-switch.
+
+### Added
+- `headroom claude-accounts reconcile` — re-links saved accounts to their verified identity, and repairs a drifted pointer. Read-only.
+
 ## [1.6.0] - 2026-07-16
 
 ### Added

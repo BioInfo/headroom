@@ -120,14 +120,24 @@ final class AppModel {
 
     // MARK: - Claude multi-account (dynamic N accounts; capture/switch in-app via `ClaudeAccounts`)
 
-    /// The label of the account currently in the live slot, per the pointer file (nil when a
-    /// single-account user has never captured — the base `claude` card just reads the live login).
-    var activeClaudeLabel: String? { ClaudeAccounts.activeLabel() }
+    /// The label of the account currently in the live slot (nil when a single-account user has
+    /// never captured — the base `claude` card just reads the live login).
+    ///
+    /// SNAPSHOTTED, not read per access. It used to hit the pointer file on every get, and
+    /// `collectors` reads it twice (once for the base card, once through `discoveredClaudeIDs`).
+    /// A switch landing between those two reads tore the render: the base card labelled from
+    /// the OLD pointer while the filter used the NEW one, so the same account appeared as two
+    /// cards — one "ACTIVE", one offering "Switch" to itself, both showing identical numbers.
+    /// One value per render is the fix.
+    private(set) var activeClaudeLabel: String? = ClaudeAccounts.loadIndex().activeLabel
 
     /// All captured account labels, cached so SwiftUI renders and refresh ticks don't each
     /// spawn a `security dump-keychain`. Refreshed on every poll and after any account op.
     private(set) var claudeAccountLabels: [String] = ClaudeAccounts.listLabels()
-    private func refreshClaudeAccountLabels() { claudeAccountLabels = ClaudeAccounts.listLabels() }
+    private func refreshClaudeAccountLabels() {
+        claudeAccountLabels = ClaudeAccounts.listLabels()
+        activeClaudeLabel = ClaudeAccounts.loadIndex().activeLabel
+    }
 
     /// Extra Claude account ids beyond the base `claude` — one `claude-acct-<label>` per
     /// stash that isn't the live account. Drives the collectors, Settings, and menu-bar.
@@ -191,7 +201,7 @@ final class AppModel {
     /// authorization prompt, which must never freeze the UI while it waits.
     func switchClaudeAccount(_ label: String) {
         Task {
-            _ = await Task.detached(priority: .userInitiated) { ClaudeAccounts.switchTo(label) }.value
+            _ = await Task.detached(priority: .userInitiated) { await ClaudeAccounts.switchTo(label) }.value
             refreshClaudeAccountLabels()
             await refresh()
         }
@@ -201,7 +211,7 @@ final class AppModel {
     /// remember the nice display name, enable its card, refresh. Returns a message to show.
     /// Keychain work runs off the main actor (see `switchClaudeAccount`).
     func captureClaudeAccount(name: String) async -> Result<String, ClaudeAccounts.OpError> {
-        let r = await Task.detached(priority: .userInitiated) { ClaudeAccounts.capture(label: name) }.value
+        let r = await Task.detached(priority: .userInitiated) { await ClaudeAccounts.capture(label: name) }.value
         if case .success = r, let label = ClaudeAccounts.sanitizeLabel(name) {
             let nice = name.trimmingCharacters(in: .whitespacesAndNewlines)
             if !nice.isEmpty { prefs.claudeAccountNames[label] = nice }

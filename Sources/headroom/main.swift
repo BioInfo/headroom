@@ -90,18 +90,26 @@ case "claude-accounts", "accounts":
     }
     switch sub {
     case "list":    ClaudeAccounts.listLabels().forEach { print($0) }
-    case "status":  print(ClaudeAccounts.statusReport())
+    case "status":  print(await ClaudeAccounts.statusReport())
+    case "reconcile":
+        // Re-bind every stash to its verified account.uuid. Read-only + non-rotating; the
+        // repair path when labels and accounts have drifted apart.
+        let idx = await ClaudeAccounts.reconcile()
+        for (label, e) in idx.accounts.sorted(by: { $0.key < $1.key }) {
+            let mark = idx.activeLabel == label ? "*" : " "
+            print("\(mark) \(label.padding(toLength: max(label.count, 10), withPad: " ", startingAt: 0)) \(e.email ?? e.uuid)")
+        }
     case "switch":
         guard let l = args.dropFirst(2).first else { fail("usage: headroom claude-accounts switch <label>"); break }
-        report(ClaudeAccounts.switchTo(l))
+        report(await ClaudeAccounts.switchTo(l))
     case "capture":
         guard let l = args.dropFirst(2).first else { fail("usage: headroom claude-accounts capture <label>"); break }
-        report(ClaudeAccounts.capture(label: l))
+        report(await ClaudeAccounts.capture(label: l))
     case "remove":
         guard let l = args.dropFirst(2).first else { fail("usage: headroom claude-accounts remove <label>"); break }
         report(ClaudeAccounts.remove(l))
     default:
-        print("usage: headroom claude-accounts [list|status|switch <label>|capture <label>|remove <label>]")
+        print("usage: headroom claude-accounts [list|status|reconcile|switch <label>|capture <label>|remove <label>]")
     }
 default:
     print("usage: headroom [usage|doctor|history [days]|spend|claude-accounts …]")
