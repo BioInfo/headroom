@@ -120,6 +120,27 @@ struct BarGauge: View {
     }
 }
 
+/// The provider's letter in a small rounded badge, tinted by usage tier — names WHO the
+/// number belongs to (CodexBar-style brand mark, drawn as our monogram: we don't ship
+/// trademarked logos). No fill; the tier color carries the pressure read. Fixed-size.
+struct MonogramGauge: View {
+    let letter: String
+    let tint: Color
+    private let s: CGFloat = 15
+    var body: some View {
+        RoundedRectangle(cornerRadius: 3.5, style: .continuous)
+            .fill(tint.opacity(0.18))
+            .overlay(RoundedRectangle(cornerRadius: 3.5, style: .continuous)
+                .strokeBorder(tint.opacity(0.7), lineWidth: 1))
+            .overlay(
+                Text(letter)
+                    .font(.system(size: 9.5, weight: .bold, design: .rounded))
+                    .foregroundStyle(tint)
+            )
+            .frame(width: s, height: s)
+    }
+}
+
 /// A battery that DRAINS as you spend: the fill shows charge LEFT (1 − usage), colored by
 /// usage tier so a nearly-empty battery reads rust = "almost out." The most literal
 /// "headroom" mark. A nub on the right sells the battery read at menu-bar size. Fixed-size.

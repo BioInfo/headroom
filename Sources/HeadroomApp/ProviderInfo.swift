@@ -12,10 +12,9 @@ enum ProviderInfo {
     /// The provider's own usage/account page. Best-effort canonical URLs; a card click
     /// opens the source of truth rather than trapping the user in the popover.
     static func dashboardURL(_ id: String) -> URL? {
+        if ClaudeAccounts.isClaudeAccountID(id) { return URL(string: "https://claude.ai/settings/usage") }
         let s: String?
         switch id {
-        case "claude":       s = "https://claude.ai/settings/usage"
-        case "claude-jands": s = "https://claude.ai/settings/usage"
         case "codex":   s = "https://chatgpt.com/codex/settings/usage"
         case "minimax": s = "https://platform.minimax.io/user-center/basic-information"
         case "zai":     s = "https://z.ai/manage-apikey/coding-plan/personal/usage"
@@ -28,30 +27,34 @@ enum ProviderInfo {
 
     /// Monogram letter for the badge.
     static func letter(_ id: String) -> String {
+        if id == "claude" { return "C" }
+        // An account card takes the label's first alphanumeric so multiple Claude discs read
+        // apart at a glance (e.g. "work" → "W"), falling back to "C".
+        if let label = ClaudeAccounts.label(forProviderID: id) {
+            return label.first { $0.isLetter || $0.isNumber }.map { String($0).uppercased() } ?? "C"
+        }
         switch id {
-        case "claude":       "C"
-        case "claude-jands": "J"   // J&S — distinct monogram from Claude's C
-        case "codex":   "X"   // disambiguates from Claude's C (Code-X)
-        case "minimax": "M"
-        case "zai":     "G"   // GLM
-        case "kimi":    "K"
-        case "grok":    "R"   // gRok (G is taken by GLM, X by Codex)
-        default:        String(id.prefix(1)).uppercased()
+        case "codex":   return "X"   // disambiguates from Claude's C (Code-X)
+        case "minimax": return "M"
+        case "zai":     return "G"   // GLM
+        case "kimi":    return "K"
+        case "grok":    return "R"   // gRok (G is taken by GLM, X by Codex)
+        default:        return String(id.prefix(1)).uppercased()
         }
     }
 
     /// A distinct tier color per provider, all drawn from the cookbook ramp so the badges
     /// stay in-palette while remaining individually recognizable.
     static func tierColor(_ id: String, _ skin: Skin) -> Color {
+        // All Claude accounts share the terracotta ramp; the monogram sets them apart.
+        if ClaudeAccounts.isClaudeAccountID(id) { return skin.ramp(.pressing) }
         switch id {
-        case "claude":       skin.ramp(.pressing)   // terracotta
-        case "claude-jands": skin.ramp(.pressing)   // same Claude terracotta; the "J" monogram sets it apart
-        case "codex":   skin.ramp(.healthy)    // olive
-        case "minimax": skin.ramp(.critical)   // rust
-        case "zai":     skin.ramp(.runaway)    // aubergine
-        case "kimi":    skin.ramp(.warming)    // clay-amber
-        case "grok":    skin.clay              // graphite-taupe (xAI reads dark; clay is our neutral)
-        default:        skin.clay
+        case "codex":   return skin.ramp(.healthy)    // olive
+        case "minimax": return skin.ramp(.critical)   // rust
+        case "zai":     return skin.ramp(.runaway)    // aubergine
+        case "kimi":    return skin.ramp(.warming)    // clay-amber
+        case "grok":    return skin.clay              // graphite-taupe (xAI reads dark; clay is our neutral)
+        default:        return skin.clay
         }
     }
 }

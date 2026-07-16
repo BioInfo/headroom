@@ -130,18 +130,32 @@ public struct ClaudeCollector: Collector {
         return creds(fromJSON: bytes)
     }
 
-    /// macOS login Keychain via `/usr/bin/security` (the macOS default store).
-    /// May prompt once to grant access; "Always Allow" persists it. No-op off macOS.
+    /// macOS login Keychain (the macOS default store). In-process no-UI read first — no
+    /// subprocess, and it can never pop the auth dialog from a background refresh. The
+    /// `/usr/bin/security` fallback covers the rare interaction-required case (existing user
+    /// grants often let it through silently); a timeout keeps a would-prompt read from
+    /// stalling the poll. No-op off macOS.
     static func credsFromKeychain(service: String) -> Creds? {
         #if os(macOS)
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        p.arguments = ["find-generic-password", "-s", service, "-w"]
-        let out = Pipe(); p.standardOutput = out; p.standardError = Pipe()
-        do { try p.run() } catch { return nil }
-        p.waitUntilExit()
-        guard p.terminationStatus == 0 else { return nil }
-        return creds(fromJSON: out.fileHandleForReading.readDataToEndOfFile())
+        switch KeychainRead.noUI(service: service) {
+        case .found(let s):
+            return creds(fromJSON: Data(s.utf8))
+        case .notFound:
+            return nil
+        case .needsInteraction, .error:
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+            p.arguments = ["find-generic-password", "-s", service, "-w"]
+            let out = Pipe(); p.standardOutput = out; p.standardError = FileHandle.nullDevice
+            do { try p.run() } catch { return nil }
+            DispatchQueue.global().asyncAfter(deadline: .now() + 10) {
+                if p.isRunning { p.terminate() }
+            }
+            let data = out.fileHandleForReading.readDataToEndOfFile()
+            p.waitUntilExit()
+            guard p.terminationStatus == 0 else { return nil }
+            return creds(fromJSON: data)
+        }
         #else
         return nil
         #endif

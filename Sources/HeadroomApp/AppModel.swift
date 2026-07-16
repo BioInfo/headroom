@@ -70,6 +70,42 @@ final class AppModel {
         }
     }
 
+    /// Warm cache of each spend provider's Today/7d/30d summary (estimated from local logs
+    /// at list rates). Computed off-main like `historyTokensByProvider`: the History
+    /// window's Spend panel reads this and never blocks on a scan. The per-file
+    /// `SpendScanCache` makes repeat scans cheap (only changed files re-parse), so this
+    /// can refresh every cycle; the ~70s cold scan happens once, off the UI path.
+    var spendSummaries: [String: SpendUsage.Summary] = [:]
+    @ObservationIgnored private var spendWarming = false
+
+    /// Kick a background spend scan into the warm cache. Coalesced like `warmHistory`.
+    func warmSpend(days: Int = 30) {
+        guard !spendWarming else { return }
+        spendWarming = true
+        Task.detached(priority: .utility) { [weak self] in
+            let pricing = await ModelPricing.load()
+            var next: [String: SpendUsage.Summary] = [:]
+            await withTaskGroup(of: (String, SpendUsage.Summary).self) { group in
+                for (id, pricingProvider) in SpendUsage.providers {
+                    group.addTask {
+                        let cache = SpendScanCache.load(provider: id)
+                        let (daily, updated) = id == "claude"
+                            ? await SpendUsage.claudeDaily(days: days, cache: cache)
+                            : await SpendUsage.codexDaily(days: days, cache: cache)
+                        updated.save(provider: id)
+                        return (id, SpendUsage.summarize(daily, provider: pricingProvider, pricing: pricing))
+                    }
+                }
+                for await (id, s) in group { next[id] = s }
+            }
+            let summaries = next
+            await MainActor.run { [weak self] in
+                self?.spendSummaries = summaries
+                self?.spendWarming = false
+            }
+        }
+    }
+
     /// Which provider the login window should authenticate. Set when a card's
     /// "Log in" button is tapped, read by the login window to pick the webview.
     var loginTargetID: String?
@@ -82,32 +118,50 @@ final class AppModel {
     // primary path is a pasted coding-plan key. Kimi/MiniMax are stateless (key/token paste).
     let zai = ZaiCollector()
 
-    // MARK: - Claude multi-account (two labeled meters + fast switch via `claude-switch`)
+    // MARK: - Claude multi-account (dynamic N accounts; capture/switch in-app via `ClaudeAccounts`)
 
-    /// Claude Code stores creds in ONE slot; `claude-switch` stashes a copy of each account
-    /// under its own Headroom-owned Keychain item and records which is live in a pointer file.
-    static let claudeLiveService = "Claude Code-credentials"
-    static let claudeStashPrefix = "Headroom-claude-acct-"
+    /// The label of the account currently in the live slot, per the pointer file (nil when a
+    /// single-account user has never captured — the base `claude` card just reads the live login).
+    var activeClaudeLabel: String? { ClaudeAccounts.activeLabel() }
 
-    /// Which Claude account is in the live slot, per the `claude-switch` pointer file.
-    /// Defaults to the primary if unset — matches legacy behavior (one Claude card that read
-    /// whatever account was logged in).
-    var activeClaudeLabel: String {
-        let p = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".claude/.headroom-active-claude")
-        let s = (try? String(contentsOf: p, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
-        return (s?.isEmpty == false) ? s! : "personal"
+    /// All captured account labels, cached so SwiftUI renders and refresh ticks don't each
+    /// spawn a `security dump-keychain`. Refreshed on every poll and after any account op.
+    private(set) var claudeAccountLabels: [String] = ClaudeAccounts.listLabels()
+    private func refreshClaudeAccountLabels() { claudeAccountLabels = ClaudeAccounts.listLabels() }
+
+    /// Extra Claude account ids beyond the base `claude` — one `claude-acct-<label>` per
+    /// stash that isn't the live account. Drives the collectors, Settings, and menu-bar.
+    var discoveredClaudeIDs: [String] {
+        let active = activeClaudeLabel
+        return claudeAccountLabels
+            .filter { $0 != active }
+            .map(ClaudeAccounts.providerID(forLabel:))
     }
+
+    /// Base providers plus any discovered Claude account cards, in display order — for the
+    /// Settings provider list and the menu-bar "specific providers" picker.
+    var allProviderIDsForDisplay: [String] {
+        var ids = Prefs.allProviderIDs
+        let insertAt = (ids.firstIndex(of: "claude").map { $0 + 1 }) ?? ids.count
+        ids.insert(contentsOf: discoveredClaudeIDs, at: insertAt)
+        return ids
+    }
+
+    /// More than one Claude account exists (the live one + at least one stash) — gates the
+    /// in-card Switch/ACTIVE chip, which only makes sense when there's somewhere to switch.
+    var isMultiAccountClaude: Bool { !discoveredClaudeIDs.isEmpty }
 
     /// Build a ClaudeCollector for one account. The ACTIVE account reads Claude Code's live
     /// slot (the CLI keeps it fresh); an INACTIVE account reads its Headroom-owned stash
     /// (frozen at last capture → token expires → the card shows last-known, dimmed).
-    private func claudeCollector(id: String, display: String, label: String, active: String) -> ClaudeCollector {
-        let isActive = (label == active)
+    private func claudeCollector(id: String, label: String?, isActive: Bool) -> ClaudeCollector {
+        // Base "Claude" while there's only one account; label each card once there are more.
+        let display: String = (isMultiAccountClaude && label != nil)
+            ? "Claude · \(prefs.claudeAccountDisplayName(label!))" : "Claude"
         return ClaudeCollector(
             id: id, displayName: display,
             credentialsPath: isActive ? nil : URL(fileURLWithPath: "/dev/null"),
-            keychainService: isActive ? Self.claudeLiveService : Self.claudeStashPrefix + label,
+            keychainService: isActive ? ClaudeAccounts.liveService : ClaudeAccounts.stashPrefix + (label ?? ""),
             includeExtraUsage: prefs.showClaudeExtraUsage)
     }
 
@@ -115,53 +169,73 @@ final class AppModel {
     /// enabled. Stateless ones (Claude/Codex/MiniMax/Kimi) are rebuilt each call so they
     /// pick up pref changes (e.g. Claude's extra-usage opt-in, or an account switch) with no restart.
     private var collectors: [any Collector] {
-        let active = activeClaudeLabel
         var all: [any Collector] = [
-            claudeCollector(id: "claude", display: "Claude", label: "personal", active: active),
+            claudeCollector(id: "claude", label: activeClaudeLabel, isActive: true),
             CodexCollector(),
             MiniMaxCollector(),
             zai,
             KimiCollector(),
             GrokCollector(),
         ]
-        // Show the second Claude meter only once it has a stash (or is the active account),
-        // so pre-bootstrap Headroom looks exactly as before (a single Claude card).
-        if active == "business" || LocalKey.stored(service: Self.claudeStashPrefix + "business") != nil {
-            all.insert(claudeCollector(id: "claude-jands", display: "Claude (J&S)", label: "business", active: active), at: 1)
+        // One card per non-active stash, inserted right after the base Claude card.
+        for (i, accID) in discoveredClaudeIDs.enumerated() {
+            let label = ClaudeAccounts.label(forProviderID: accID)
+            all.insert(claudeCollector(id: accID, label: label, isActive: false), at: 1 + i)
         }
         return all.filter { prefs.isEnabled($0.id) }
     }
 
-    /// Flip the live Claude account via the `claude-switch` CLI, then refresh so the two
-    /// meters swap their live/last-known roles. Takes effect for NEW `claude` sessions.
+    /// Flip the live Claude account (in-app, no shell-out), then refresh so the cards swap
+    /// their live/last-known roles. Takes effect for NEW `claude` sessions. The Keychain
+    /// write runs off the main actor: modifying the live slot can show a one-time macOS
+    /// authorization prompt, which must never freeze the UI while it waits.
     func switchClaudeAccount(_ label: String) {
-        let script = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("scripts/claude-switch").path
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/bin/bash")
-        p.arguments = [script, label]
-        p.standardOutput = Pipe(); p.standardError = Pipe()
-        do { try p.run(); p.waitUntilExit() } catch { return }
-        Task { await refresh() }
+        Task {
+            _ = await Task.detached(priority: .userInitiated) { ClaudeAccounts.switchTo(label) }.value
+            refreshClaudeAccountLabels()
+            await refresh()
+        }
     }
 
-    /// True once both Claude meters are present (i.e. the J&S account has been captured) —
-    /// gates the in-card account switcher, which only makes sense with two accounts.
-    var hasBothClaudeMeters: Bool {
-        usages.contains { $0.provider == "claude" } && usages.contains { $0.provider == "claude-jands" }
+    /// Capture the currently-logged-in Claude account under a user-typed name: stash it,
+    /// remember the nice display name, enable its card, refresh. Returns a message to show.
+    /// Keychain work runs off the main actor (see `switchClaudeAccount`).
+    func captureClaudeAccount(name: String) async -> Result<String, ClaudeAccounts.OpError> {
+        let r = await Task.detached(priority: .userInitiated) { ClaudeAccounts.capture(label: name) }.value
+        if case .success = r, let label = ClaudeAccounts.sanitizeLabel(name) {
+            let nice = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !nice.isEmpty { prefs.claudeAccountNames[label] = nice }
+            prefs.setEnabled(ClaudeAccounts.providerID(forLabel: label), true)
+            refreshClaudeAccountLabels()
+            Task { await refresh() }
+        }
+        return r
+    }
+
+    /// Remove a saved (non-active) Claude account stash + its display name, then refresh.
+    /// Keychain work runs off the main actor (see `switchClaudeAccount`).
+    func removeClaudeAccount(_ label: String) async -> Result<String, ClaudeAccounts.OpError> {
+        let r = await Task.detached(priority: .userInitiated) { ClaudeAccounts.remove(label) }.value
+        if case .success = r {
+            prefs.claudeAccountNames[label] = nil
+            refreshClaudeAccountLabels()
+            Task { await refresh() }
+        }
+        return r
     }
 
     /// For a Claude card: the switch label + whether it's the live account, or nil for
-    /// non-Claude cards / before the second account exists. Drives the card's Switch/Active chip.
+    /// non-Claude cards / single-account setups. Drives the card's Switch/ACTIVE chip.
     func claudeSwitchInfo(for id: String) -> (label: String, isActive: Bool)? {
-        guard hasBothClaudeMeters else { return nil }
-        let label: String
-        switch id {
-        case "claude":       label = "personal"
-        case "claude-jands": label = "business"
-        default:             return nil
+        guard isMultiAccountClaude else { return nil }
+        if id == "claude" {
+            guard let active = activeClaudeLabel else { return nil }
+            return (active, true)                       // the base card is the live account
         }
-        return (label, label == activeClaudeLabel)
+        if let label = ClaudeAccounts.label(forProviderID: id) {
+            return (label, false)                       // a stash card is never the live account
+        }
+        return nil
     }
 
     // MARK: - last-good persistence
@@ -245,6 +319,7 @@ final class AppModel {
         recomputeMenuBar()   // re-seed the glyph state before the first refresh lands
         observeWake()
         warmHistory()   // precompute the History window's data so it opens instantly
+        warmSpend()     // precompute the Spend panel (cold scan once, warm afterwards)
         rehydrateLastGood()   // seed last-known so the first poll of an inactive account isn't a blank card
         refreshTask = Task { [weak self] in
             var first = true
@@ -318,6 +393,7 @@ final class AppModel {
     func refresh(force: Bool = true, base: TimeInterval? = nil) async {
         isRefreshing = true
         defer { isRefreshing = false }
+        refreshClaudeAccountLabels()   // pick up accounts captured/removed outside the app (e.g. the CLI)
         let now = Date()
         // The per-provider due-check is measured against this base. The loop passes the
         // cycle's base (fixed or adaptive); non-loop callers (manual, wake, key/enable)
@@ -369,10 +445,13 @@ final class AppModel {
         guard collectedAny else { return }   // an empty tick (nothing due) changes nothing
         lastRefresh = now
         UsageHistory.shared.record(usages)   // append today's reading for trend/heatmap
+        BurnSampler.shared.record(usages)    // append (t, fraction) burn samples for the burn-down chart
         warmHistory()                         // keep the History window's cache fresh
+        warmSpend()                           // keep the Spend panel fresh (cheap on a warm cache)
         notifier.evaluate(usages, thresholds: prefs.notifyThresholds, enabled: prefs.notify,
                           sound: prefs.notifySound, onReset: prefs.notifyOnReset,
-                          onDeplete: prefs.notifyOnDeplete, snoozeUntil: prefs.snoozeUntil)
+                          onDeplete: prefs.notifyOnDeplete, onPace: prefs.notifyOnPace,
+                          snoozeUntil: prefs.snoozeUntil)
     }
 
     /// Fetch provider service health from the public status pages, throttled to every 5 min
@@ -444,15 +523,28 @@ final class AppModel {
     /// What refills when, soonest first. Powers the History window's reset timeline.
     var resetTimeline: [ResetEntry] { ResetTimeline.from(usages) }
 
+    /// Tightest authoritative metric over a set of usages (the meter behind the fraction —
+    /// carries `resetAt` for the exhausted-countdown swap).
+    private func tightestMetric(in list: [ProviderUsage]) -> Metric? {
+        list.flatMap { $0.metrics }
+            .filter { $0.authoritative && $0.fractionUsed != nil }
+            .max { ($0.fractionUsed ?? 0) < ($1.fractionUsed ?? 0) }
+    }
+
     /// Tightest authoritative fraction (0...1) over a set of usages.
     private func tightest(in list: [ProviderUsage]) -> Double? {
-        list.flatMap { $0.metrics }.filter { $0.authoritative }
-            .compactMap { $0.fractionUsed }.max()
+        tightestMetric(in: list)?.fractionUsed
     }
 
     /// Tightest authoritative fraction for one provider.
     func fraction(forProvider id: String) -> Double? {
         tightest(in: usages.filter { $0.id == id })
+    }
+
+    /// The tightest authoritative metric for one provider — the meter a glance row shows
+    /// (fraction + its reset), same resolution the menu bar's tightest mode uses.
+    func glanceMetric(forProvider id: String) -> Metric? {
+        tightestMetric(in: usages.filter { $0.id == id })
     }
 
     /// The signature multi-provider move: when your hottest subscription is running low,
@@ -490,32 +582,50 @@ final class AppModel {
     /// resolved meter's label too (for the VoiceOver string). Distinct from
     /// `fraction(forProvider:)`, which is always tightest (the "use this next" hint wants
     /// the worst meter regardless of what's pinned in the menu bar).
-    private func menuBarFraction(forProvider id: String) -> (fraction: Double?, label: String?) {
+    private func menuBarFraction(forProvider id: String) -> (fraction: Double?, label: String?, resetAt: Date?) {
         if let pinned = prefs.pinnedMeters[id],
            let m = pinnableMeters(forProvider: id).first(where: { $0.label == pinned }) {
-            return (m.fractionUsed, m.label)
+            return (m.fractionUsed, m.label, m.resetAt)
         }
-        return (fraction(forProvider: id), nil)   // tightest; label nil = "tightest meter"
+        let m = tightestMetric(in: usages.filter { $0.id == id })
+        return (m?.fractionUsed, nil, m?.resetAt)   // tightest; label nil = "tightest meter"
     }
 
     /// One entry per hat the menu bar should draw, in the user's chosen order. A single
     /// entry for tightest/hat-only; up to three for the multi-provider bar. `id` is
     /// "_tightest" for the aggregate hat (no specific provider). `meterLabel` is the
-    /// pinned meter's name when one resolved, else nil (tightest).
-    struct GlyphItem: Identifiable { let id: String; let fraction: Double?; var meterLabel: String? = nil }
+    /// pinned meter's name when one resolved, else nil (tightest). `resetAt` is the
+    /// resolved meter's reset, for the exhausted-countdown swap.
+    struct GlyphItem: Identifiable {
+        let id: String; let fraction: Double?
+        var meterLabel: String? = nil
+        var resetAt: Date? = nil
+    }
 
     /// Build the menu-bar items for the current glyph source. The source of truth that
     /// `recomputeMenuBar` snapshots into the stored `menuBarItems`.
     private func computeGlyphItems() -> [GlyphItem] {
         switch prefs.glyphSource {
         case .tightest, .hatOnly:
-            return [GlyphItem(id: "_tightest", fraction: tightest(in: usages))]
+            let m = tightestMetric(in: usages)
+            return [GlyphItem(id: "_tightest", fraction: m?.fractionUsed, resetAt: m?.resetAt)]
+        case .mostUsed:
+            // Auto-pick the hottest PROVIDER (not just the hottest meter) so the item carries
+            // an identity — the monogram style then names who's burning, hands-free.
+            let hottest = usages
+                .compactMap { u -> (id: String, m: Metric)? in
+                    tightestMetric(in: [u]).map { (u.id, $0) }
+                }
+                .max { ($0.m.fractionUsed ?? 0) < ($1.m.fractionUsed ?? 0) }
+            guard let hottest else { return [GlyphItem(id: "_tightest", fraction: nil)] }
+            return [GlyphItem(id: hottest.id, fraction: hottest.m.fractionUsed,
+                              resetAt: hottest.m.resetAt)]
         case .providers(let ids):
             let live = ids.filter { prefs.isEnabled($0) }
             let pick = live.isEmpty ? ids : live   // if none enabled, still show what was chosen
             return pick.prefix(GlyphSource.maxProviders).map { id in
                 let r = menuBarFraction(forProvider: id)
-                return GlyphItem(id: id, fraction: r.fraction, meterLabel: r.label)
+                return GlyphItem(id: id, fraction: r.fraction, meterLabel: r.label, resetAt: r.resetAt)
             }
         }
     }
@@ -530,14 +640,18 @@ final class AppModel {
         menuBarFlame = prefs.showPeakHours && prefs.peakHoursFlame && PeakHours.isPeak()
         // Composite the whole label into one image so the MenuBarExtra reliably swaps it.
         menuBarImage = MenuBarGlyph.compose(items: menuBarItems, showPercent: menuBarShowsPercent,
-                                            style: menuBarStyle, flame: menuBarFlame)
-        menuBarA11y = MenuBarGlyph.a11y(items: menuBarItems)
+                                            style: menuBarStyle, flame: menuBarFlame,
+                                            resetWhenExhausted: prefs.resetWhenExhausted,
+                                            showRemaining: prefs.menuBarShowsRemaining)
+        menuBarA11y = MenuBarGlyph.a11y(items: menuBarItems, showRemaining: prefs.menuBarShowsRemaining)
     }
 
     // MARK: glyph-pref setters (route through here so the menu bar recomputes live)
 
     func setGlyphSource(_ source: GlyphSource) { prefs.glyphSource = source; recomputeMenuBar() }
     func setGlyphStyle(_ style: GlyphStyle)    { prefs.glyphStyle = style; recomputeMenuBar() }
+    func setResetWhenExhausted(_ on: Bool)     { prefs.resetWhenExhausted = on; recomputeMenuBar() }
+    func setMenuBarShowsRemaining(_ on: Bool)  { prefs.menuBarShowsRemaining = on; recomputeMenuBar() }
     /// Pin a provider's menu-bar meter to `label`, or nil to clear (back to tightest).
     func setPinnedMeter(_ id: String, label: String?) {
         if let label { prefs.pinnedMeters[id] = label } else { prefs.pinnedMeters[id] = nil }

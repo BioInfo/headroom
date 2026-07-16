@@ -31,15 +31,17 @@ final class Notifier {
 
     /// Compare the latest readings against the thresholds + cap and post any fresh
     /// transition. `thresholds` are percents (e.g. [75, 90, 95]). `onReset` gates the soft
-    /// "window refilled" ping; `onDeplete` gates the "exhausted"/"back" pair.
+    /// "window refilled" ping; `onDeplete` gates the "exhausted"/"back" pair; `onPace` the
+    /// predictive pace-risk alert (one per deficit episode).
     func evaluate(_ usages: [ProviderUsage], thresholds: [Int], enabled: Bool,
                   sound: Bool = true, onReset: Bool = false, onDeplete: Bool = true,
-                  snoozeUntil: Date? = nil) {
+                  onPace: Bool = false, snoozeUntil: Date? = nil) {
         guard enabled else { state.clear(); return }
         // Advance transition state ALWAYS — even while snoozed — so resuming from a snooze
         // only surfaces *new* transitions, never a backlog of everything that fired quietly.
         let (alerts, newState) = NotificationPlan.evaluate(
-            usages, thresholds: thresholds, onReset: onReset, onDeplete: onDeplete, state: state)
+            usages, thresholds: thresholds, onReset: onReset, onDeplete: onDeplete,
+            onPace: onPace, state: state)
         state = newState
         if let until = snoozeUntil, Date() < until { return }   // snoozed: state advanced, don't post
         for alert in alerts { post(alert, sound: sound) }
@@ -63,6 +65,13 @@ final class Notifier {
         case let .refilled(provider, meter):
             deliver(id: "\(provider)-\(meter)-refilled", title: "\(provider): back under",
                     body: "\(meter) refilled. You've got headroom again.", sound: sound)
+        case let .paceRisk(provider, meter, deficit, runsOut):
+            var body = "\(meter) is \(deficit)% over even burn."
+            if let runsOut {
+                body += " At this rate it runs out ~\(runsOut.formatted(date: .omitted, time: .shortened))."
+            }
+            deliver(id: "\(provider)-\(meter)-pace", title: "\(provider): burning fast",
+                    body: body, sound: sound)
         }
     }
 

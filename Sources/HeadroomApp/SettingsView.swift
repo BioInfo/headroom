@@ -115,9 +115,10 @@ private struct ProvidersTab: View {
             VStack(alignment: .leading, spacing: 10) {
                 Text("Track only what you pay for. Web/key providers light up once a key is pasted or you log in once.")
                     .font(.caption).foregroundStyle(skin.faint)
-                ForEach(Prefs.allProviderIDs, id: \.self) { id in
+                ForEach(model.allProviderIDsForDisplay, id: \.self) { id in
                     ProviderRow(model: model, skin: skin, id: id, openLogin: openLogin)
                 }
+                ClaudeAccountsSection(model: model, skin: skin)
                 HStack(spacing: 5) {
                     Text("Pay for a tool that isn't here?").font(.caption).foregroundStyle(skin.faint)
                     Link("Request a provider →", destination: HeadroomLinks.requestProvider)
@@ -204,6 +205,96 @@ private struct ProviderRow: View {
     }
 }
 
+// MARK: - Claude accounts
+
+/// Capture / switch / remove multiple Claude accounts, all in-app (no CLI). Claude has no
+/// in-app browser login, so to add a *different* account the user logs into it with `claude`
+/// in a terminal, then captures the live session here under a name.
+private struct ClaudeAccountsSection: View {
+    @Bindable var model: AppModel
+    let skin: Skin
+    @State private var adding = false
+    @State private var newName = ""
+    @State private var message: String?
+
+    private var labels: [String] { model.claudeAccountLabels }
+    private var active: String? { model.activeClaudeLabel }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack {
+                Text("Claude accounts").font(.subheadline.weight(.semibold)).foregroundStyle(skin.ink)
+                Spacer()
+                if !labels.isEmpty {
+                    Text("\(labels.count) saved").font(.caption2).foregroundStyle(skin.faint)
+                }
+            }
+            Text("Show a gauge per Claude account and switch which one the CLI uses. Log into another account with `claude` in a terminal, then add it here.")
+                .font(.caption2).foregroundStyle(skin.faint)
+                .fixedSize(horizontal: false, vertical: true)
+
+            ForEach(labels, id: \.self) { label in
+                HStack(spacing: 8) {
+                    Text(model.prefs.claudeAccountDisplayName(label))
+                        .font(.caption).foregroundStyle(skin.ink)
+                    if label == active {
+                        Text("ACTIVE").font(.caption2.weight(.bold))
+                            .foregroundStyle(skin.ramp(.healthy))
+                            .padding(.horizontal, 5).padding(.vertical, 1.5)
+                            .background(skin.ramp(.healthy).opacity(0.15), in: Capsule())
+                    }
+                    Spacer()
+                    if label != active {
+                        Button("Switch") { model.switchClaudeAccount(label) }
+                            .controlSize(.small).buttonStyle(.borderless).tint(skin.clay)
+                        Button("Remove") {
+                            Task { showResult(await model.removeClaudeAccount(label)) }
+                        }
+                        .controlSize(.small).buttonStyle(.borderless).tint(skin.ink2)
+                    }
+                }
+            }
+
+            if adding {
+                HStack(spacing: 6) {
+                    TextField("Name (e.g. Personal, Work)", text: $newName)
+                        .textFieldStyle(.roundedBorder).font(.caption)
+                    Button("Save") {
+                        let name = newName
+                        newName = ""; adding = false
+                        Task { showResult(await model.captureClaudeAccount(name: name)) }
+                    }
+                    .controlSize(.small).buttonStyle(.bordered).tint(skin.clay)
+                    .disabled(newName.trimmingCharacters(in: .whitespaces).isEmpty)
+                    Button("Cancel") { newName = ""; adding = false }
+                        .controlSize(.small).buttonStyle(.borderless).tint(skin.ink2)
+                }
+            } else {
+                Button { adding = true } label: {
+                    Label("Add current Claude account…", systemImage: "plus.circle").font(.caption)
+                }
+                .controlSize(.small).buttonStyle(.borderless).tint(skin.clay)
+            }
+
+            if let message {
+                Text(message).font(.caption2).foregroundStyle(skin.faint)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(11)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 9).fill(skin.card))
+        .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(skin.edge, lineWidth: 1))
+    }
+
+    private func showResult(_ r: Result<String, ClaudeAccounts.OpError>) {
+        switch r {
+        case .success(let m): message = m
+        case .failure(let e): message = e.message
+        }
+    }
+}
+
 // MARK: - Appearance
 
 private struct AppearanceTab: View {
@@ -211,11 +302,12 @@ private struct AppearanceTab: View {
     let skin: Skin
     private var prefs: Prefs { model.prefs }
 
-    private enum Mode: String, Hashable { case tightest, providers, hatOnly }
+    private enum Mode: String, Hashable { case tightest, mostUsed, providers, hatOnly }
 
     private var mode: Mode {
         switch prefs.glyphSource {
         case .tightest:  .tightest
+        case .mostUsed:  .mostUsed
         case .providers: .providers
         case .hatOnly:   .hatOnly
         }
@@ -223,10 +315,11 @@ private struct AppearanceTab: View {
     private func setMode(_ m: Mode) {
         switch m {
         case .tightest: model.setGlyphSource(.tightest)
+        case .mostUsed: model.setGlyphSource(.mostUsed)
         case .hatOnly:  model.setGlyphSource(.hatOnly)
         case .providers:
             let cur = chosenProviders
-            let seed = cur.isEmpty ? Array(Prefs.allProviderIDs.filter { prefs.isEnabled($0) }.prefix(1)) : cur
+            let seed = cur.isEmpty ? Array(model.allProviderIDsForDisplay.filter { prefs.isEnabled($0) }.prefix(1)) : cur
             model.setGlyphSource(seed.isEmpty ? .tightest : .providers(seed))
         }
     }
@@ -261,12 +354,13 @@ private struct AppearanceTab: View {
             Section {
                 Picker("Menu-bar shows", selection: Binding(get: { mode }, set: { setMode($0) })) {
                     Text("Tightest meter (all providers)").tag(Mode.tightest)
+                    Text("Most-used provider (auto-pick)").tag(Mode.mostUsed)
                     Text("Specific providers (up to \(GlyphSource.maxProviders))").tag(Mode.providers)
                     Text("Hat only (no %)").tag(Mode.hatOnly)
                 }
                 if mode == .providers {
                     let chosen = chosenProviders
-                    ForEach(Prefs.allProviderIDs.filter { prefs.isEnabled($0) }, id: \.self) { id in
+                    ForEach(model.allProviderIDsForDisplay.filter { prefs.isEnabled($0) }, id: \.self) { id in
                         Toggle(Prefs.displayName(id), isOn: Binding(
                             get: { chosen.contains(id) },
                             set: { _ in toggleProvider(id) }))
@@ -287,6 +381,9 @@ private struct AppearanceTab: View {
                     }
                     Text("Each shows its own hat + % in the menu bar, in this order. Pick which meter a multi-meter provider shows, or leave it on its tightest. Enable a provider in the Providers tab to choose it here.")
                         .font(.caption).foregroundStyle(skin.faint)
+                } else if mode == .mostUsed {
+                    Text("Tracks whichever provider is hottest right now and follows it as the lead changes. Pair with the Monogram style to see who it is at a glance.")
+                        .font(.caption).foregroundStyle(skin.faint)
                 } else {
                     Text("The glyph fills and warms with whichever meter you pick.")
                         .font(.caption).foregroundStyle(skin.faint)
@@ -297,7 +394,21 @@ private struct AppearanceTab: View {
                     get: { prefs.glyphStyle }, set: { model.setGlyphStyle($0) })) {
                     ForEach(GlyphStyle.allCases) { Text($0.title).tag($0) }
                 }
-                Text("The chef-hat is the family mark. Bar is a flat meter; Battery drains as you spend (reads as charge left).")
+                Text("The chef-hat is the family mark. Bar is a flat meter; Battery drains as you spend (reads as charge left); Monogram shows the provider's letter so the % is named.")
+                    .font(.caption).foregroundStyle(skin.faint)
+            }
+            Section {
+                Toggle("Show remaining instead of used", isOn: Binding(
+                    get: { prefs.menuBarShowsRemaining },
+                    set: { model.setMenuBarShowsRemaining($0) }))
+                Text("The menu-bar % counts DOWN what's left (and the hat/bar drain) instead of counting up what's spent. The battery always shows remaining.")
+                    .font(.caption).foregroundStyle(skin.faint)
+            }
+            Section {
+                Toggle("Show reset time when a meter runs out", isOn: Binding(
+                    get: { prefs.resetWhenExhausted },
+                    set: { model.setResetWhenExhausted($0) }))
+                Text("At 100% the menu bar shows the countdown to the reset (\u{201C}45m\u{201D}, \u{201C}3h\u{201D}) instead of the percent, then reverts once the window refills.")
                     .font(.caption).foregroundStyle(skin.faint)
             }
             Section {
@@ -396,6 +507,7 @@ private struct GeneralTab: View {
                     }
                     Toggle("Play a sound", isOn: $prefs.notifySound)
                     Toggle("Alert when a window is exhausted (and when it's back)", isOn: $prefs.notifyOnDeplete)
+                    Toggle("Warn when burning fast (projected to run out)", isOn: $prefs.notifyOnPace)
                     Toggle("Ping when a window refills", isOn: $prefs.notifyOnReset)
                     if prefs.isSnoozed, let until = prefs.snoozeUntil {
                         HStack {

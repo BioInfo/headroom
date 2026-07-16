@@ -84,7 +84,7 @@ public struct Metric: Codable, Sendable, Identifiable {
               let used = fractionUsed else { return nil }
         let start = reset.addingTimeInterval(-dur)
         let elapsed = min(max(now.timeIntervalSince(start) / dur, 0), 1)
-        guard elapsed >= 0.05 else { return nil }  // too little of the window has passed
+        guard elapsed >= PaceStatus.minElapsed else { return nil }  // too little of the window has passed
         return Pace(elapsed: elapsed, projected: used / elapsed)
     }
 

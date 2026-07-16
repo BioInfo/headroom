@@ -6,8 +6,13 @@ import HeadroomKit
 
 struct MenuContent: View {
     @Bindable var model: AppModel
+    /// Snapshot-harness override for the Overview (compact) mode — the harness must not
+    /// write the user's real Prefs to render one panel compact. nil = follow the pref.
+    var forceCompact: Bool? = nil
     @Environment(\.openWindow) private var openWindow
     @Environment(\.colorScheme) private var scheme
+
+    private var isCompact: Bool { forceCompact ?? model.prefs.popoverCompact }
 
     /// Open one of our Window scenes from the menu-bar popover. An `.accessory` app
     /// isn't frontmost, so a bare `openWindow` lands the window BEHIND everything and
@@ -82,20 +87,33 @@ struct MenuContent: View {
                 Text("No data yet.").foregroundStyle(skin.faint).font(.callout)
             }
 
-            ForEach(model.usages) { usage in
-                ProviderCard(usage: usage, skin: skin,
-                             health: model.serviceHealth[usage.provider],
-                             refreshing: model.isRefreshing,
-                             canWebLogin: model.loginWebView(for: usage.provider) != nil,
-                             canKey: model.keyService(for: usage.provider) != nil,
-                             peak: model.peakHoursActive && usage.provider.hasPrefix("claude"),
-                             claudeSwitch: model.claudeSwitchInfo(for: usage.provider),
-                             onLogin: {
-                    model.loginTargetID = usage.provider
-                    surface("login")
-                },
-                             onSettings: { openSettings() },
-                             onSwitchClaude: { model.switchClaudeAccount($0) })
+            if isCompact {
+                // Overview: one dense glance row per provider — badge · name · tightest %
+                // · reset. The whole lineup in a hand-height popover; cards are a toggle away.
+                VStack(spacing: 3) {
+                    ForEach(model.usages) { usage in
+                        GlanceRow(usage: usage, skin: skin,
+                                  metric: model.glanceMetric(forProvider: usage.provider),
+                                  health: model.serviceHealth[usage.provider],
+                                  isActiveClaude: model.claudeSwitchInfo(for: usage.provider)?.isActive == true)
+                    }
+                }
+            } else {
+                ForEach(model.usages) { usage in
+                    ProviderCard(usage: usage, skin: skin,
+                                 health: model.serviceHealth[usage.provider],
+                                 refreshing: model.isRefreshing,
+                                 canWebLogin: model.loginWebView(for: usage.provider) != nil,
+                                 canKey: model.keyService(for: usage.provider) != nil,
+                                 peak: model.peakHoursActive && usage.provider.hasPrefix("claude"),
+                                 claudeSwitch: model.claudeSwitchInfo(for: usage.provider),
+                                 onLogin: {
+                        model.loginTargetID = usage.provider
+                        surface("login")
+                    },
+                                 onSettings: { openSettings() },
+                                 onSwitchClaude: { model.switchClaudeAccount($0) })
+                }
             }
 
             Rectangle().fill(skin.edge).frame(height: 1)
@@ -105,6 +123,11 @@ struct MenuContent: View {
                         .font(.caption2).foregroundStyle(skin.faint)
                 }
                 Spacer()
+                Button { model.prefs.popoverCompact.toggle() } label: {
+                    Image(systemName: isCompact ? "rectangle.grid.1x2" : "list.bullet")
+                }
+                .buttonStyle(.borderless).tint(skin.ink2)
+                .help(isCompact ? "Show full cards" : "Overview — one line per provider")
                 Button { surface("history") } label: { Image(systemName: "chart.bar.xaxis") }
                     .buttonStyle(.borderless).tint(skin.ink2).help("Usage history")
                 Button { openSettings() } label: { Image(systemName: "gearshape") }
@@ -176,6 +199,71 @@ struct UseThisNextBanner: View {
     }
 }
 
+// MARK: - Overview glance row (compact popover mode)
+
+/// One dense line per provider: badge · name · (ACTIVE) · health · tightest % in tier
+/// color · compact reset. The whole point is height — seven providers in the space three
+/// cards take. Click opens the provider's dashboard, same as a card header.
+struct GlanceRow: View {
+    let usage: ProviderUsage
+    let skin: Skin
+    var metric: Metric? = nil          // the provider's tightest meter (fraction + reset)
+    var health: ServiceHealth? = nil
+    var isActiveClaude: Bool = false
+
+    private var dashboard: URL? { ProviderInfo.dashboardURL(usage.provider) }
+
+    /// "45m" exhausted-countdown, else the tightest %, else a status word.
+    private var reading: (text: String, color: Color) {
+        if usage.status == .needsLogin { return ("log in", skin.clay) }
+        guard let f = metric?.fractionUsed else { return ("—", skin.faint) }
+        if let back = ExhaustedReset.countdown(fraction: f, resetAt: metric?.resetAt) {
+            return (back, skin.ramp(metric?.severityFraction ?? f))
+        }
+        return ("\(Int((f * 100).rounded()))%", skin.ramp(metric?.severityFraction ?? f))
+    }
+
+    var body: some View {
+        HStack(spacing: 7) {
+            ProviderBadge(id: usage.provider, skin: skin, size: 15)
+            Text(usage.displayName)
+                .font(.caption.weight(.medium)).foregroundStyle(skin.ink)
+                .lineLimit(1).truncationMode(.tail)
+            if isActiveClaude {
+                Circle().fill(skin.ramp(.healthy)).frame(width: 5, height: 5)
+                    .help("Active Claude account")
+            }
+            if let health, health.isNotable {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 9))
+                    .foregroundStyle(health == .down ? skin.ramp(.critical) : skin.ramp(.warming))
+                    .help(health == .down ? "Down" : "Degraded")
+            }
+            Spacer(minLength: 6)
+            Text(reading.text)
+                .font(.caption.monospacedDigit().weight(.semibold))
+                .foregroundStyle(reading.color)
+                .opacity(usage.status == .stale ? 0.55 : 1)
+            if let reset = metric?.resetAt, reset > Date() {
+                Text(ExhaustedReset.compact(until: reset, from: Date()))
+                    .font(.caption2.monospacedDigit()).foregroundStyle(skin.faint)
+                    .frame(minWidth: 26, alignment: .trailing)
+            } else {
+                Text("").frame(minWidth: 26)   // keep the % column aligned
+            }
+        }
+        .padding(.horizontal, 9).padding(.vertical, 5)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(skin.card))
+        .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(skin.edge, lineWidth: 1))
+        .contentShape(Rectangle())
+        .onTapGesture { if let url = dashboard { NSWorkspace.shared.open(url) } }
+        .help(dashboard != nil ? "Open \(usage.displayName)'s usage dashboard" : "")
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(usage.displayName): \(reading.text)\(metric?.resetAt.map { ", resets \($0.formatted(.relative(presentation: .named)))" } ?? "")")
+    }
+}
+
 // MARK: - One provider
 
 struct ProviderCard: View {
@@ -193,7 +281,7 @@ struct ProviderCard: View {
     var claudeSwitch: (label: String, isActive: Bool)? = nil
     var onLogin: () -> Void
     var onSettings: () -> Void = {}
-    /// Flip the live Claude account (menu-bar switch, shells `claude-switch`). Passed only for Claude cards.
+    /// Flip the live Claude account (in-app, via `ClaudeAccounts`). Passed only for Claude cards.
     var onSwitchClaude: ((String) -> Void)? = nil
 
     /// Stale data, or a refresh in flight over a still-shown reading: dim the meters so
@@ -203,16 +291,22 @@ struct ProviderCard: View {
     /// Open the provider's own usage dashboard (the source of truth this card indexes).
     private var dashboard: URL? { ProviderInfo.dashboardURL(usage.provider) }
 
+    /// Header layout under pressure: the chips (plan, ACTIVE/Switch, health) are `fixedSize`
+    /// so they can never truncate into "ACTI…"/"De-gra…" — the provider NAME is the one
+    /// element that gives way (single line, tail-truncated), and the health pill drops its
+    /// word before the name has to (ViewThatFits → icon-only, words in the tooltip).
     private var cardHeader: some View {
         HStack(spacing: 6) {
             ProviderBadge(id: usage.provider, skin: skin)
             Text(usage.displayName)
                 .font(.subheadline.weight(.semibold)).foregroundStyle(skin.ink)
+                .lineLimit(1).truncationMode(.tail)
             if let plan = usage.plan {
                 Text(plan.uppercased())
                     .font(.caption2.weight(.bold)).foregroundStyle(skin.bg2)
                     .padding(.horizontal, 5).padding(.vertical, 1.5)
                     .background(skin.clay, in: Capsule())
+                    .fixedSize()
             }
             if let cs = claudeSwitch {
                 if cs.isActive {
@@ -220,12 +314,14 @@ struct ProviderCard: View {
                         .font(.caption2.weight(.bold)).foregroundStyle(skin.ramp(.healthy))
                         .padding(.horizontal, 5).padding(.vertical, 1.5)
                         .background(skin.ramp(.healthy).opacity(0.15), in: Capsule())
+                        .fixedSize()
                         .help("This is the live Claude account for the CLI")
                 } else {
                     Button { onSwitchClaude?(cs.label) } label: {
                         Text("Switch").font(.caption2.weight(.semibold))
                     }
                     .buttonStyle(.borderless).tint(skin.clay)
+                    .fixedSize()
                     .help("Make this the active Claude account for the Claude Code CLI (takes effect for new sessions)")
                 }
             }
@@ -235,7 +331,7 @@ struct ProviderCard: View {
                     .help("Peak hours · \(PeakHours.windowLabel)")
                     .accessibilityLabel("Peak hours")
             }
-            Spacer()
+            Spacer(minLength: 4)
             if let health, health.isNotable {
                 ServiceHealthPill(health: health, skin: skin)
             }
@@ -297,19 +393,26 @@ struct ProviderCard: View {
 
 /// A small service-health pill on a card when the provider's status page reports trouble —
 /// so a flat meter during an outage reads as "their side is down," not "you're fine."
+/// Degrades gracefully under header pressure: the worded pill when it fits, otherwise just
+/// the colored triangle (the word moves to the tooltip) — never a mid-word "De-gra…".
 struct ServiceHealthPill: View {
     let health: ServiceHealth
     let skin: Skin
     private var label: String { health == .down ? "Down" : "Degraded" }
     private var color: Color { health == .down ? skin.ramp(.critical) : skin.ramp(.warming) }
     var body: some View {
-        HStack(spacing: 3) {
-            Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 8))
-            Text(label).font(.caption2.weight(.semibold))
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 3) {
+                Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 8))
+                Text(label).font(.caption2.weight(.semibold)).fixedSize()
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 5).padding(.vertical, 1.5)
+            .background(color, in: Capsule())
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 10)).foregroundStyle(color)
         }
-        .foregroundStyle(.white)
-        .padding(.horizontal, 5).padding(.vertical, 1.5)
-        .background(color, in: Capsule())
+        .help("\(label) — from the provider's status page")
         .accessibilityLabel("Service \(label.lowercased())")
     }
 }
@@ -365,8 +468,7 @@ struct GaugeRow: View {
     }
 
     private var meteredRow: some View {
-        let pace = metric.pace()
-        let ahead = metric.aheadOfPace()
+        let pace = metric.paceStatus()
         return VStack(alignment: .leading, spacing: 3) {
             HStack {
                 Text(metric.label).font(.caption).foregroundStyle(skin.ink2)
@@ -384,20 +486,16 @@ struct GaugeRow: View {
                     Text("resets \(reset.formatted(.relative(presentation: .named)))")
                         .font(.caption2).foregroundStyle(skin.faint)
                 }
-                if let eta = etaLabel {
+                if let pace {
                     if metric.resetAt != nil {
                         Text("·").font(.caption2).foregroundStyle(skin.faint)
                     }
-                    Text(eta)
-                        .font(.caption2.weight(.medium))
-                        .foregroundStyle(skin.ramp(pace?.willExhaust == true ? .pressing : .warming))
-                } else if ahead {
-                    if metric.resetAt != nil {
-                        Text("·").font(.caption2).foregroundStyle(skin.faint)
-                    }
-                    Text("ahead of pace")
-                        .font(.caption2.weight(.medium))
-                        .foregroundStyle(skin.ramp(pace?.willExhaust == true ? .pressing : .warming))
+                    // With the reset time already on the line, the compact form ("8% in
+                    // reserve") skips a second "until reset"; deficit keeps its full
+                    // run-out/landing clause — that's the actionable part.
+                    Text(metric.resetAt != nil ? pace.shortSummary() : pace.summary())
+                        .font(.caption2.weight(pace.kind == .deficit ? .medium : .regular))
+                        .foregroundStyle(paceColor(pace))
                 }
             }
         }
@@ -405,26 +503,16 @@ struct GaugeRow: View {
         .accessibilityLabel(accessibilityText)
     }
 
-    /// Burn-rate ETA (Tier 1 #2): once enough of the window has elapsed and you're ahead of
-    /// pace, name where this lands — "empties ~3:40pm" if projected to exhaust, else
-    /// "lands ~140%". Gated to ahead-of-pace so it isn't noisy when you're coasting.
-    private var etaLabel: String? {
-        guard let p = metric.pace(), metric.aheadOfPace(), let reset = metric.resetAt,
-              let dur = metric.windowDuration, dur > 0, let used = metric.fractionUsed,
-              used > 0 else { return nil }
-        if p.willExhaust {
-            // time to hit 1.0 at the current rate, projected from now
-            let rate = used / max(p.elapsed, 0.0001)              // fraction per window-fraction
-            let fractionToFull = (1.0 - used) / max(rate, 0.0001) // window-fractions remaining
-            let when = Date().addingTimeInterval(fractionToFull * dur)
-            // A bare clock time only reads right intra-day. If exhaustion is more than ~16h
-            // out (the weekly case), show the projected landing % instead of a misleading
-            // "~9:55 AM" that looks like today.
-            if when < reset, when.timeIntervalSinceNow < 16 * 3600 {
-                return "empties ~\(when.formatted(date: .omitted, time: .shortened))"
-            }
+    /// Reserve reads calm (olive), even reads neutral, deficit warms — pressing when the
+    /// projected run-out is near enough to name a clock time (same horizon the phrase uses).
+    private func paceColor(_ p: PaceStatus) -> Color {
+        switch p.kind {
+        case .reserve: skin.ramp(.healthy)
+        case .even:    skin.faint
+        case .deficit:
+            skin.ramp((p.runsOutAt.map { $0.timeIntervalSinceNow < PaceStatus.clockHorizon } ?? false)
+                      ? .pressing : .warming)
         }
-        return "lands ~\(Int((p.projected * 100).rounded()))%"
     }
 
     private var accessibilityText: String {
@@ -432,7 +520,7 @@ struct GaugeRow: View {
         if let p = metric.percentUsed { s += ", \(Int(p.rounded())) percent used" }
         else if let u = metric.used, let l = metric.limit { s += ", \(Int(u)) of \(Int(l))" }
         if let reset = metric.resetAt { s += ", resets \(reset.formatted(.relative(presentation: .named)))" }
-        if let eta = etaLabel { s += ", \(eta)" }
+        if let pace = metric.paceStatus() { s += ", \(pace.summary())" }
         return s
     }
 

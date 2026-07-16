@@ -58,6 +58,51 @@ case "history":
     for d in series { total += d.tokens
         print("  \(fmt.string(from: d.day)): \(d.tokens.formatted()) tokens") }
     print("  total: \(total.formatted()) over \(series.count) active days")
+case "spend":
+    // Estimated local spend from provider session logs, priced at models.dev list rates.
+    // An estimate of consumption value on a subscription, not a bill.
+    let pricing = await ModelPricing.load()
+    if pricing.isEmpty { print("note: pricing catalog unavailable (models.dev unreachable, no cache) — token counts only") }
+    print("Estimated spend from local logs, last 30 days (list rates; subscriptions don't bill per token):")
+    for (id, pricingProvider) in SpendUsage.providers {
+        // Same per-file cache the app maintains — a warm run only parses changed files.
+        let cache = SpendScanCache.load(provider: id)
+        let (daily, updated) = id == "claude" ? await SpendUsage.claudeDaily(days: 30, cache: cache)
+                                              : await SpendUsage.codexDaily(days: 30, cache: cache)
+        updated.save(provider: id)
+        let s = SpendUsage.summarize(daily, provider: pricingProvider, pricing: pricing)
+        func usd(_ v: Double) -> String { String(format: "$%.2f", v) }
+        print("  \(id): today \(usd(s.today)) · 7d \(usd(s.last7)) · 30d \(usd(s.last30))")
+        for m in s.byModel30.prefix(6) {
+            let cost = m.usd.map { String(format: "$%.2f", $0) } ?? "unpriced"
+            print("    \(m.model): \(cost)  (\(m.tokens.formatted()) tokens)")
+        }
+        if s.unpricedTokens30 > 0 {
+            print("    (\(s.unpricedTokens30.formatted()) tokens not in the pricing catalog)")
+        }
+    }
+case "claude-accounts", "accounts":
+    // Headless multi-account management (same Keychain stashes the app uses).
+    let sub = args.dropFirst().first ?? "status"
+    func fail(_ m: String) { FileHandle.standardError.write(Data((m + "\n").utf8)); exit(1) }
+    func report(_ r: Result<String, ClaudeAccounts.OpError>) {
+        switch r { case .success(let m): print(m); case .failure(let e): fail(e.message) }
+    }
+    switch sub {
+    case "list":    ClaudeAccounts.listLabels().forEach { print($0) }
+    case "status":  print(ClaudeAccounts.statusReport())
+    case "switch":
+        guard let l = args.dropFirst(2).first else { fail("usage: headroom claude-accounts switch <label>"); break }
+        report(ClaudeAccounts.switchTo(l))
+    case "capture":
+        guard let l = args.dropFirst(2).first else { fail("usage: headroom claude-accounts capture <label>"); break }
+        report(ClaudeAccounts.capture(label: l))
+    case "remove":
+        guard let l = args.dropFirst(2).first else { fail("usage: headroom claude-accounts remove <label>"); break }
+        report(ClaudeAccounts.remove(l))
+    default:
+        print("usage: headroom claude-accounts [list|status|switch <label>|capture <label>|remove <label>]")
+    }
 default:
-    print("usage: headroom [usage|doctor|history [days]]")
+    print("usage: headroom [usage|doctor|history [days]|spend|claude-accounts …]")
 }

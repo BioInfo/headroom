@@ -11,11 +11,18 @@ struct HistoryView: View {
     let model: AppModel
     /// Snapshot/preview hook: when set, skip the async log read and render these.
     var preloaded: [TokenDay]? = nil
+    /// Shoot-harness hook for the burn-down panel: synthetic samples per lane (the real
+    /// store only accrues while the app runs, so a fresh harness would always shoot the
+    /// empty state). The guide window is derived from the samples in this mode.
+    var preloadedBurn: [BurnLane: [BurnSample]]? = nil
     @Environment(\.colorScheme) private var scheme
     @State private var days: [TokenDay] = []
     @State private var loading = true
     /// Which provider's token series is shown (Claude / Codex — the ones with local logs).
     @State private var tokenProvider = "claude"
+    /// Burn-down panel state: which provider + lane the chart tracks.
+    @State private var burnProvider = "claude"
+    @State private var burnLane: BurnLane = .session
 
     var body: some View {
         let skin = Skin(model.prefs.effectiveScheme(scheme))
@@ -34,6 +41,8 @@ struct HistoryView: View {
                     trend(skin)
                     heatmap(skin)
                 }
+                burnPanel(skin)
+                spendPanel(skin)
                 utilizationPanel(skin)
             }
             .padding(18)
@@ -259,6 +268,195 @@ struct HistoryView: View {
         case ..<0.8:   skin.ramp(.pressing)
         default:       skin.ramp(.critical)
         }
+    }
+
+    // MARK: burn-down (within-window burn vs the even-burn guide)
+
+    /// The current window for a provider+lane from live usages: the tightest matching
+    /// capped meter's (start, reset) — the same meter the sampler records.
+    private func liveWindow(_ provider: String, _ lane: BurnLane) -> (start: Date, reset: Date)? {
+        guard let u = model.usages.first(where: { $0.id == provider }) else { return nil }
+        let m = u.metrics
+            .filter { $0.authoritative && !$0.unlimited && BurnLane.lane(forWindowSeconds: $0.windowDuration) == lane }
+            .max { ($0.fractionUsed ?? 0) < ($1.fractionUsed ?? 0) }
+        guard let m, let reset = m.resetAt, let dur = m.windowDuration else { return nil }
+        return (reset.addingTimeInterval(-dur), reset)
+    }
+
+    /// Samples for the chart: the harness's synthetic set, or the live sampler store.
+    private func burnSamples(_ provider: String, _ lane: BurnLane) -> [BurnSample] {
+        if let preloadedBurn { return preloadedBurn[lane] ?? [] }
+        return BurnSampler.shared.series(provider: provider, lane: lane,
+                                         hours: lane == .session ? 12 : 8 * 24)
+    }
+
+    /// Providers with any burn samples, for the picker (falls back to the token provider
+    /// so the picker isn't empty before data accrues).
+    private var burnProviders: [String] {
+        if preloadedBurn != nil { return ["claude"] }
+        let h = BurnSampler.shared.history
+        let ids = Set(BurnLane.allCases.flatMap { h.providers(in: $0) })
+        return ids.isEmpty ? [] : model.allProviderIDsForDisplay.filter { ids.contains($0) }
+    }
+
+    /// How the window burned down, against the straight even-burn line from the window's
+    /// start to its reset. Fill to the LEFT of the guide = banked reserve; a curve above
+    /// it = deficit. Data accrues while Headroom runs (BurnSampler, 14-day retention).
+    private func burnPanel(_ skin: Skin) -> some View {
+        let providers = burnProviders
+        let window = preloadedBurn != nil ? nil : liveWindow(burnProvider, burnLane)
+        var samples = burnSamples(burnProvider, burnLane)
+        // Synthetic mode: derive a plausible window from the samples so the guide renders.
+        let guide: (start: Date, reset: Date)? = window ?? {
+            guard preloadedBurn != nil, let first = samples.first else { return nil }
+            let dur: TimeInterval = burnLane == .session ? 5 * 3600 : 604_800
+            return (first.t, first.t.addingTimeInterval(dur))
+        }()
+        // Show only the CURRENT window's burn when we know it (that's the story the guide
+        // tells); otherwise the recent tail so an idle/disabled provider still shows data.
+        if let guide { samples = samples.filter { $0.t >= guide.start } }
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Text("Burn-down").font(.subheadline.weight(.semibold)).foregroundStyle(skin.ink2)
+                Spacer()
+                if providers.count > 1 {
+                    Picker("", selection: $burnProvider) {
+                        ForEach(providers, id: \.self) { Text(Prefs.displayName($0)).tag($0) }
+                    }
+                    .pickerStyle(.menu).labelsHidden().fixedSize()
+                }
+                Picker("", selection: $burnLane) {
+                    ForEach(BurnLane.allCases, id: \.self) { Text($0.displayName).tag($0) }
+                }
+                .pickerStyle(.segmented).labelsHidden().fixedSize()
+            }
+            if samples.count < 2 {
+                Text("Burn samples accrue while Headroom runs — the chart appears once this window has a little history.")
+                    .font(.caption).foregroundStyle(skin.faint)
+            } else {
+                Chart {
+                    if let guide {
+                        LineMark(x: .value("Time", guide.start), y: .value("Used", 0),
+                                 series: .value("Series", "even burn"))
+                            .foregroundStyle(skin.faint.opacity(0.8))
+                            .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [4, 4]))
+                        LineMark(x: .value("Time", guide.reset), y: .value("Used", 100),
+                                 series: .value("Series", "even burn"))
+                            .foregroundStyle(skin.faint.opacity(0.8))
+                            .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [4, 4]))
+                    }
+                    ForEach(samples.indices, id: \.self) { i in
+                        LineMark(x: .value("Time", samples[i].t),
+                                 y: .value("Used", samples[i].f * 100),
+                                 series: .value("Series", "burn"))
+                            .foregroundStyle(skin.ramp(.pressing))
+                            .lineStyle(StrokeStyle(lineWidth: 2))
+                            .interpolationMethod(.monotone)
+                    }
+                }
+                .chartYScale(domain: 0...100)
+                .chartXScale(domain: (guide.map { $0.start...$0.reset })
+                             ?? ((samples.first!.t)...(samples.last!.t)))
+                .chartYAxis {
+                    AxisMarks(values: [0.0, 25, 50, 75, 100]) { v in
+                        AxisGridLine().foregroundStyle(skin.edge.opacity(0.5))
+                        AxisValueLabel {
+                            if let d = v.as(Double.self) {
+                                Text("\(Int(d))%").font(.caption2).foregroundStyle(skin.faint)
+                            }
+                        }
+                    }
+                }
+                .chartXAxis {
+                    AxisMarks { _ in
+                        AxisGridLine().foregroundStyle(skin.edge.opacity(0.4))
+                        AxisValueLabel(format: burnLane == .session
+                                       ? .dateTime.hour().minute() : .dateTime.weekday(.abbreviated))
+                            .font(.caption2)
+                    }
+                }
+                .frame(height: 160)
+                HStack(spacing: 12) {
+                    HStack(spacing: 5) {
+                        Rectangle().fill(skin.ramp(.pressing)).frame(width: 14, height: 2)
+                        Text("actual burn").font(.caption2).foregroundStyle(skin.ink2)
+                    }
+                    if guide != nil {
+                        HStack(spacing: 5) {
+                            Rectangle().fill(skin.faint.opacity(0.8)).frame(width: 14, height: 2)
+                            Text("even burn to reset").font(.caption2).foregroundStyle(skin.faint)
+                        }
+                    }
+                    Spacer(minLength: 0)
+                }
+            }
+        }
+        .padding(12).frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 10).fill(skin.card))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(skin.edge, lineWidth: 1))
+    }
+
+    // MARK: spend (estimated $ from local logs at list rates)
+
+    /// What the machine's local logs are worth at list rates, per provider. An estimate of
+    /// consumption value on a flat subscription — the "how much would this have cost à la
+    /// carte" number — never a bill, and labeled so. Reads the warm cache only (AppModel
+    /// scans off-main); before the first cold scan lands it shows a quiet scanning note.
+    private func spendPanel(_ skin: Skin) -> some View {
+        let ids = SpendUsage.providers.map(\.id).filter { model.spendSummaries[$0] != nil }
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Spend — estimated").font(.subheadline.weight(.semibold)).foregroundStyle(skin.ink2)
+                Spacer()
+                Text("local logs at list rates · not a bill").font(.caption2).foregroundStyle(skin.faint)
+            }
+            if ids.isEmpty {
+                Text("Scanning local logs… (first pass parses everything; later passes are quick)")
+                    .font(.caption).foregroundStyle(skin.faint)
+            } else {
+                ForEach(ids, id: \.self) { id in
+                    if let s = model.spendSummaries[id] { spendSection(id, s, skin) }
+                }
+            }
+        }
+        .padding(12).frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 10).fill(skin.card))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(skin.edge, lineWidth: 1))
+    }
+
+    private func spendSection(_ id: String, _ s: SpendUsage.Summary, _ skin: Skin) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 8) {
+                ProviderBadge(id: id, skin: skin, size: 16)
+                Text(Prefs.displayName(id)).font(.caption.weight(.semibold)).foregroundStyle(skin.ink)
+                Spacer()
+                Text("Today \(usd(s.today)) · 7d \(usd(s.last7)) · 30d \(usd(s.last30))")
+                    .font(.caption.monospacedDigit()).foregroundStyle(skin.ink2)
+            }
+            ForEach(s.byModel30.prefix(5)) { m in
+                HStack(spacing: 6) {
+                    Text(m.model).font(.caption2).foregroundStyle(skin.ink2)
+                        .lineLimit(1).truncationMode(.middle)
+                    Spacer()
+                    Text(fmtTokens(m.tokens)).font(.caption2.monospacedDigit()).foregroundStyle(skin.faint)
+                    Text(m.usd.map(usd) ?? "unpriced")
+                        .font(.caption2.monospacedDigit().weight(.medium))
+                        .foregroundStyle(m.usd == nil ? skin.faint : skin.ink)
+                        .frame(minWidth: 64, alignment: .trailing)
+                }
+                .padding(.leading, 24)
+            }
+            if s.unpricedTokens30 > 0 {
+                Text("\(fmtTokens(s.unpricedTokens30)) tokens not in the pricing catalog")
+                    .font(.caption2).foregroundStyle(skin.faint).padding(.leading, 24)
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    /// "$23,018" past a thousand (cents are noise there), "$97.40" below.
+    private func usd(_ v: Double) -> String {
+        v >= 1000 ? "$\(Int(v.rounded()).formatted())" : String(format: "$%.2f", v)
     }
 
     // MARK: cross-provider utilization (self-recorded peak % used per day)

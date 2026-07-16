@@ -5,7 +5,23 @@ All notable changes to Headroom are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.6.0] - 2026-07-16
+
+### Added
+- **Spend panel in Usage History.** What your local session logs are worth at list rates: per-provider Today / 7d / 30d totals plus a per-model breakdown, labeled "local logs at list rates · not a bill." A per-file scan cache means the first pass parses everything and every later refresh takes under a second, even on months of heavy logs.
+- **Burn-down chart in Usage History.** How the current session and weekly windows actually burned, drawn against the straight even-burn line from window start to reset. Below the line is banked reserve; above it is deficit. Samples accrue automatically while Headroom runs (14-day retention, on your Mac).
+- **Pace, in plain language.** Meter rows now say where you stand against even burn: "27% in reserve," "on pace," or "12% in deficit · runs out ~9:27 PM" (with a projected landing % when the run-out is more than a day away). Replaces the old "ahead of pace / lands ~%" phrasing.
+- **Predictive pace alert (opt-in).** One notification when a meter crosses into deficit, meaning it will run out before the reset at the current rate, while there is still time to slow down. One per risk episode; re-arms only after you return to reserve or the window resets. Settings → General → notifications.
+- **Popover Overview mode.** One dense line per provider (badge · tightest % · reset) instead of full cards, so the whole lineup fits at a glance when you track many providers or accounts. Toggle from the popover footer; click a row to open that provider's dashboard.
+- **Menu-bar options:** a Monogram glyph style (the provider's letter badge, so the % is named), a "show remaining instead of used" flip (the % counts down and the hat/bar drain), and a "most-used provider" mode that auto-tracks whichever provider is hottest right now. Settings → Appearance.
+- **Reset countdown when a meter runs out.** At 100% the menu bar shows the time until the window resets ("45m", "3h") in place of the percent, then reverts once it refills. The percent tells you nothing once you're capped; when it comes back is the number you act on. On by default; toggle in Settings → Appearance.
+- **`headroom spend`.** Estimated consumption value from the provider's own local session logs (Claude and Codex), priced per model at models.dev list rates: today / 7-day / 30-day totals plus a per-model breakdown. It reads what your machine actually pushed and prices it at list, so you can see what your subscription delivered. An estimate, not a bill; unknown models are reported as unpriced rather than guessed. Uses the same scan cache as the app, so repeat runs are fast.
+- **Multiple Claude accounts.** Track more than one Claude subscription at once, a gauge card per account, and switch which one the Claude Code CLI uses from inside Headroom. Add an account under a name (Settings → Providers → Claude accounts → "Add current Claude account"), switch from any account card or the accounts list, and remove ones you no longer need. To add a second account, log into it with `claude` in a terminal first (Claude has no in-app browser login), then capture it. Switching takes effect for new `claude` sessions. The same actions run headless: `headroom claude-accounts [list|status|switch <label>|capture <label>|remove <label>]`.
+
+### Changed
+- Card headers no longer cram when a Degraded/Down badge appears: chips never truncate mid-word, and the health badge collapses to a colored triangle (word in the tooltip) when space is tight.
+- Keychain reads never prompt. Usage polling and account listing use in-process, non-interactive reads (with a timeout-guarded fallback to the classic path), so a background refresh can never pop the macOS authorization dialog or stall behind one. Only a user-initiated account switch can prompt, once.
+- Each account's credentials live in Headroom's own Keychain items, verified by read-back on every write. The token itself is never read into the app or logged. The first switch may ask macOS to authorize Keychain access; choose "Always Allow" and it won't ask again.
 
 ## [1.5.0] - 2026-07-15
 

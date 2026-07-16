@@ -17,15 +17,39 @@ enum Entry {
             MainActor.assumeIsolated { AppIcon.render(to: path, px: px) }
             return
         }
-        // Deterministic check of the composited menu-bar label (two providers + %), so the
+        // Deterministic check of the composited menu-bar label (two providers + %, plus an
+        // exhausted meter that must render its reset countdown instead of "100%"), so the
         // multi-hat render can be verified offscreen without watching the live menu bar.
+        // Renders one row per style × used/remaining, so every glyph mode is on the sheet.
         if let i = args.firstIndex(of: "--compose-shot") {
             let path = args[safe: i + 1] ?? "menubar.png"
             MainActor.assumeIsolated {
                 let items = [AppModel.GlyphItem(id: "claude", fraction: 0.02, meterLabel: "Weekly"),
-                             AppModel.GlyphItem(id: "kimi", fraction: 0.14, meterLabel: nil)]
-                let img = MenuBarGlyph.compose(items: items, showPercent: true, style: .hat, flame: false)
-                if let tiff = img.tiffRepresentation,
+                             AppModel.GlyphItem(id: "kimi", fraction: 0.14, meterLabel: nil),
+                             AppModel.GlyphItem(id: "codex", fraction: 1.0, meterLabel: nil,
+                                                resetAt: Date().addingTimeInterval(45 * 60))]
+                var rows: [NSImage] = []
+                for style in GlyphStyle.allCases {
+                    for remaining in [false, true] {
+                        rows.append(MenuBarGlyph.compose(items: items, showPercent: true,
+                                                         style: style, flame: false,
+                                                         showRemaining: remaining))
+                    }
+                }
+                let pad: CGFloat = 8
+                let w = (rows.map(\.size.width).max() ?? 1) + pad * 2
+                let h = rows.reduce(0) { $0 + $1.size.height + pad } + pad
+                let canvas = NSImage(size: NSSize(width: w, height: h))
+                canvas.lockFocus()
+                NSColor.windowBackgroundColor.setFill()
+                NSRect(origin: .zero, size: canvas.size).fill()
+                var y = pad
+                for row in rows.reversed() {   // draw bottom-up; reversed keeps declaration order top-down
+                    row.draw(at: NSPoint(x: pad, y: y), from: .zero, operation: .sourceOver, fraction: 1)
+                    y += row.size.height + pad
+                }
+                canvas.unlockFocus()
+                if let tiff = canvas.tiffRepresentation,
                    let rep = NSBitmapImageRep(data: tiff),
                    let png = rep.representation(using: .png, properties: [:]) {
                     try? png.write(to: URL(fileURLWithPath: path))
@@ -137,18 +161,28 @@ struct HeadroomApp: App {
 enum MenuBarGlyph {
     /// Compose the full menu-bar label into one image, laid out left→right like the old
     /// HStack: optional flame, then per item a hat (+ % when shown). 7pt between items,
-    /// 3pt between a hat and its %.
+    /// 3pt between a hat and its %. `showRemaining` flips the % text and the hat/bar fill
+    /// to "what's left" (the battery already draws remaining; tier colors stay usage-keyed).
     @MainActor static func compose(items: [AppModel.GlyphItem], showPercent: Bool,
-                                   style: GlyphStyle, flame: Bool) -> NSImage {
+                                   style: GlyphStyle, flame: Bool,
+                                   resetWhenExhausted: Bool = true,
+                                   showRemaining: Bool = false) -> NSImage {
         let h: CGFloat = 18, interItem: CGFloat = 7, innerGap: CGFloat = 3
         var pieces: [(img: NSImage, gap: CGFloat)] = []
         if flame, let f = flameImage() { pieces.append((f, 0)) }
         for item in items {
             let gap: CGFloat = pieces.isEmpty ? 0 : interItem
-            pieces.append((glyphImage(for: item.fraction, style: style), gap))
+            pieces.append((glyphImage(for: item.fraction, style: style,
+                                      letter: letter(for: item.id), showRemaining: showRemaining), gap))
             if showPercent, let frac = item.fraction {
-                let t = textImage("\(Int((frac * 100).rounded()))%", color: NSColor(tint(for: frac)))
-                pieces.append((t, innerGap))
+                // An exhausted meter's "100%" is dead information — show when it's back
+                // instead ("45m", "3h"), in the same tier color, then revert after reset.
+                let clamped = min(max(frac, 0), 1)
+                let percent = Int(((showRemaining ? 1 - clamped : clamped) * 100).rounded())
+                let text = (resetWhenExhausted
+                            ? ExhaustedReset.countdown(fraction: frac, resetAt: item.resetAt)
+                            : nil) ?? "\(percent)%"
+                pieces.append((textImage(text, color: NSColor(tint(for: frac))), innerGap))
             }
         }
         let totalW = pieces.reduce(0) { $0 + $1.gap + $1.img.size.width }
@@ -167,15 +201,27 @@ enum MenuBarGlyph {
     }
 
     /// VoiceOver label for the composed image: every item read out in order.
-    @MainActor static func a11y(items: [AppModel.GlyphItem]) -> String {
+    @MainActor static func a11y(items: [AppModel.GlyphItem], showRemaining: Bool = false) -> String {
         guard !items.isEmpty else { return "Headroom usage" }
         let parts = items.map { item -> String in
             let base = item.id == "_tightest" ? "tightest meter" : Prefs.displayName(item.id)
             let who = item.meterLabel.map { "\(base) \($0)" } ?? base
             guard let f = item.fraction else { return "\(who) no data" }
-            return "\(who) \(Int((f * 100).rounded())) percent used"
+            if let back = ExhaustedReset.countdown(fraction: f, resetAt: item.resetAt) {
+                return "\(who) exhausted, resets in \(back)"
+            }
+            let clamped = min(max(f, 0), 1)
+            return showRemaining
+                ? "\(who) \(Int(((1 - clamped) * 100).rounded())) percent left"
+                : "\(who) \(Int((f * 100).rounded())) percent used"
         }
         return "Headroom: " + parts.joined(separator: ", ")
+    }
+
+    /// The monogram letter for a glyph item: the provider's badge letter, or "H"(eadroom)
+    /// for the aggregate tightest item, which belongs to no single provider.
+    @MainActor private static func letter(for id: String) -> String {
+        id == "_tightest" ? "H" : ProviderInfo.letter(id)
     }
 
     private static func flameImage() -> NSImage? {
@@ -202,13 +248,19 @@ enum MenuBarGlyph {
         return Color(hex: Theme.light.ramp(fraction: f))
     }
 
-    @MainActor private static func glyphImage(for fraction: Double?, style: GlyphStyle) -> NSImage {
+    @MainActor private static func glyphImage(for fraction: Double?, style: GlyphStyle,
+                                              letter: String = "H",
+                                              showRemaining: Bool = false) -> NSImage {
         let f = fraction ?? 0
         let c = tint(for: fraction)
+        // Remaining mode inverts the hat/bar fill (they drain as you spend). The battery
+        // already draws charge-left; the monogram has no fill. Tint stays usage-keyed.
+        let fill = showRemaining ? 1 - min(max(f, 0), 1) : f
         let content: AnyView = switch style {
-        case .hat:     AnyView(ChefHatGauge(fraction: f, tint: c).frame(width: 16, height: 16))
-        case .bar:     AnyView(BarGauge(fraction: f, tint: c))
-        case .battery: AnyView(BatteryGauge(fraction: f, tint: c))
+        case .hat:      AnyView(ChefHatGauge(fraction: fill, tint: c).frame(width: 16, height: 16))
+        case .bar:      AnyView(BarGauge(fraction: fill, tint: c))
+        case .battery:  AnyView(BatteryGauge(fraction: f, tint: c))
+        case .monogram: AnyView(MonogramGauge(letter: letter, tint: c))
         }
         let renderer = ImageRenderer(content: content)
         renderer.scale = NSScreen.main?.backingScaleFactor ?? 2
@@ -285,11 +337,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// placeholder for each. Mock data so it shows the full 5-provider lineup + capacity + hint.
     @MainActor private func renderPopover(to path: String) {
         func mock() -> AppModel {
-            let m = AppModel(); m.usages = Snapshot.mock; m.lastRefresh = Date(); return m
+            let m = AppModel(); m.usages = Snapshot.mock; m.lastRefresh = Date()
+            // Exercise the crammed-header case: health pills competing with plan/ACTIVE
+            // chips (the pill must shed its word before anything truncates mid-word).
+            m.serviceHealth = ["claude": .degraded, "codex": .down]
+            return m
         }
+        // Deliberate split: light panel = full cards, dark panel = Overview (compact) mode,
+        // so every snapshot exercises both popover modes (forceCompact keeps the harness
+        // from writing the user's real popoverCompact pref).
         let root = HStack(alignment: .top, spacing: 16) {
-            MenuContent(model: mock()).environment(\.colorScheme, .light)
-            MenuContent(model: mock()).environment(\.colorScheme, .dark)
+            MenuContent(model: mock(), forceCompact: false).environment(\.colorScheme, .light)
+            MenuContent(model: mock(), forceCompact: true).environment(\.colorScheme, .dark)
         }
         .padding(16)
         .background(Color(white: 0.5))
@@ -315,12 +374,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @MainActor private func renderAndShoot(_ id: String, to path: String) {
         let model = AppModel()
+        model.warmSpend()   // the History Spend panel reads the warm cache; a cached scan lands well inside the capture delay
         let scheme: ColorScheme = .light
+        // Synthetic burn samples so the burn-down chart shoots deterministically (the real
+        // store only accrues while the app runs): a session that idles, then burns hard
+        // past the even-burn line — both sides of the guide visible.
+        let t0 = Date().addingTimeInterval(-4 * 3600)
+        let burn: [BurnLane: [BurnSample]] = [
+            .session: [(0.0, 0.02), (0.5, 0.06), (1.0, 0.08), (1.5, 0.08), (2.0, 0.22),
+                       (2.5, 0.41), (3.0, 0.58), (3.5, 0.72), (3.9, 0.86)]
+                .map { BurnSample(t: t0.addingTimeInterval($0.0 * 3600), f: $0.1) },
+            .week: [(0.0, 0.10), (12.0, 0.14), (24.0, 0.21), (48.0, 0.33), (72.0, 0.35),
+                    (96.0, 0.52)].map { BurnSample(t: t0.addingTimeInterval(-96 * 3600 + $0.0 * 3600), f: $0.1) },
+        ]
+        // Tall enough that History's full panel stack (trend, heatmap, burn-down, spend,
+        // utilization) is on the sheet — a 560pt viewport clipped everything below the heatmap.
+        let h: CGFloat = id == "settings" ? 560 : 1700
         let root: AnyView = id == "settings"
             ? AnyView(SettingsView(model: model).environment(\.colorScheme, scheme))
-            : AnyView(HistoryView(model: model, preloaded: Snapshot.mockTokens)
-                .frame(width: 720, height: 560).environment(\.colorScheme, scheme))
-        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 720, height: 560),
+            : AnyView(HistoryView(model: model, preloaded: Snapshot.mockTokens, preloadedBurn: burn)
+                .frame(width: 720, height: h).environment(\.colorScheme, scheme))
+        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 720, height: h),
                            styleMask: [.titled], backing: .buffered, defer: false)
         win.contentView = NSHostingView(rootView: root)
         win.makeKeyAndOrderFront(nil)

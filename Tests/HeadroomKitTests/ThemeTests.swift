@@ -65,7 +65,7 @@ struct PaceTests {
     }
 
     @Test func tooEarlyInWindowReturnsNil() {
-        // Reset 4.9h away in a 5h window → 2% elapsed, below the 5% floor.
+        // Reset 4.9h away in a 5h window → 2% elapsed, below the 3% floor.
         let m = Metric(label: "5h", percentUsed: 10, unit: .percent,
                        resetAt: now.addingTimeInterval(4.9 * 3600), windowDuration: h5)
         #expect(m.pace(asOf: now) == nil)
