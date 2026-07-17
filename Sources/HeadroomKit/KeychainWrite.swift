@@ -26,9 +26,29 @@ public enum KeychainWrite {
         public var isOK: Bool { self == .ok }
     }
 
-    /// Create or update a generic-password item, preserving the existing item's ACL when it
-    /// already exists (an update never widens access on its own — that's why the live slot
-    /// keeps working for Claude Code after we write it).
+    /// Create or update a generic-password item.
+    ///
+    /// ## ⚠️ ONLY EVER CALL THIS ON AN ITEM WE OWN (`Headroom-*`).
+    ///
+    /// This doc used to claim an update "never widens access on its own — that's why the live
+    /// slot keeps working for Claude Code after we write it." **That was exactly backwards,
+    /// and it cost a user a password prompt every ~20 minutes for a day.** An update does not
+    /// widen access; it *narrows* it onto the writer. `SecItemUpdate` leaves the trusted-app
+    /// ACL alone (verified) but silently **rewrites the item's PARTITION LIST to the calling
+    /// binary's identity**, evicting whoever owned it:
+    ///
+    /// ```
+    /// partitions BEFORE:  ["apple-tool:"]
+    /// SecItemUpdate -> OK
+    /// partitions AFTER:   ["cdhash:<the writer>"]
+    /// ```
+    ///
+    /// The evicted owner must then type the login-keychain password on every read, and it
+    /// cannot be repaired without that password (restoring a partition list is a CHANGE-ACL
+    /// operation, and CHANGE-ACL carries an empty trusted list by design — it always prompts).
+    ///
+    /// Writing our own `Headroom-*` stashes is safe: we are the only reader, so narrowing the
+    /// partition onto ourselves costs nothing.
     public static func upsert(service: String, account: String, value: String) -> Outcome {
         #if os(macOS)
         guard let data = value.data(using: .utf8) else { return .error(errSecParam) }

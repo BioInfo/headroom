@@ -50,8 +50,12 @@ final class AppModel {
     @ObservationIgnored private var historyWarming = false
 
     /// Kick a background parse of every token provider's local logs into the warm cache.
-    /// Cheap to call often (each parse only reads log files modified in the window); coalesced
-    /// so overlapping refreshes don't stack parses. Providers warm concurrently.
+    /// Coalesced so overlapping refreshes don't stack parses; providers warm concurrently.
+    ///
+    /// The per-file `TokenScanCache` is what makes this safe to call every refresh cycle:
+    /// the window is 182 days, so the file-mtime filter excludes almost nothing and an
+    /// uncached parse re-reads the whole corpus (measured: 12,508 files / 8.56 GB, enough
+    /// to peg a core forever). Cached, only changed/new files re-parse.
     func warmHistory(days: Int = 182) {
         guard !historyWarming else { return }
         historyWarming = true
@@ -59,12 +63,18 @@ final class AppModel {
             var next: [String: [TokenDay]] = [:]
             await withTaskGroup(of: (String, [TokenDay]).self) { group in
                 for p in UsageHistory.tokenProviders {
-                    group.addTask { (p, await UsageHistory.tokenSeries(for: p, days: days)) }
+                    group.addTask {
+                        let cache = TokenScanCache.load(provider: p)
+                        let (series, updated) = await UsageHistory.tokenSeries(for: p, days: days, cache: cache)
+                        updated.save(provider: p)
+                        return (p, series)
+                    }
                 }
                 for await (p, series) in group { next[p] = series }
             }
-            await MainActor.run {
-                self?.historyTokensByProvider = next
+            let warmed = next
+            await MainActor.run { [weak self] in
+                self?.historyTokensByProvider = warmed
                 self?.historyWarming = false
             }
         }
@@ -195,21 +205,16 @@ final class AppModel {
         return all.filter { prefs.isEnabled($0.id) }
     }
 
-    /// Flip the live Claude account (in-app, no shell-out), then refresh so the cards swap
-    /// their live/last-known roles. Takes effect for NEW `claude` sessions. The Keychain
-    /// write runs off the main actor: modifying the live slot can show a one-time macOS
-    /// authorization prompt, which must never freeze the UI while it waits.
-    func switchClaudeAccount(_ label: String) {
-        Task {
-            _ = await Task.detached(priority: .userInitiated) { await ClaudeAccounts.switchTo(label) }.value
-            refreshClaudeAccountLabels()
-            await refresh()
-        }
-    }
+    // Account switching was removed in 1.6.2: it required writing Claude Code's own Keychain
+    // item, which evicts Claude Code from that item's partition list and leaves the user with
+    // a password prompt every ~20 minutes that we cannot silently repair. See the note on
+    // `ClaudeAccounts.switchTo`. Accounts are changed with Claude Code's own `/login`; the
+    // cards stay read-only.
 
     /// Capture the currently-logged-in Claude account under a user-typed name: stash it,
     /// remember the nice display name, enable its card, refresh. Returns a message to show.
-    /// Keychain work runs off the main actor (see `switchClaudeAccount`).
+    /// Keychain work runs off the main actor so a slow first Keychain access can't freeze the
+    /// UI. Only writes our own `Headroom-claude-acct-*` item, never Claude Code's.
     func captureClaudeAccount(name: String) async -> Result<String, ClaudeAccounts.OpError> {
         let r = await Task.detached(priority: .userInitiated) { await ClaudeAccounts.capture(label: name) }.value
         if case .success = r, let label = ClaudeAccounts.sanitizeLabel(name) {

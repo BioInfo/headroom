@@ -51,7 +51,10 @@ case "usage", "--json":
     emit(await runHeadlessCollectors())
 case "history":
     let days = Int(args.dropFirst().first ?? "14") ?? 14
-    let series = await UsageHistory.claudeTokenSeries(days: days)
+    // Same per-file cache the app uses, so the CLI doesn't re-read the whole corpus either.
+    let hCache = TokenScanCache.load(provider: "claude")
+    let (series, hUpdated) = await UsageHistory.claudeTokenSeries(days: days, cache: hCache)
+    hUpdated.save(provider: "claude")
     let fmt = DateFormatter(); fmt.dateFormat = "EEE yyyy-MM-dd"
     print("Claude token throughput, last \(days) days (from ~/.claude logs):")
     var total = 0
@@ -100,8 +103,26 @@ case "claude-accounts", "accounts":
             print("\(mark) \(label.padding(toLength: max(label.count, 10), withPad: " ", startingAt: 0)) \(e.email ?? e.uuid)")
         }
     case "switch":
-        guard let l = args.dropFirst(2).first else { fail("usage: headroom claude-accounts switch <label>"); break }
-        report(await ClaudeAccounts.switchTo(l))
+        // Removed in 1.6.2. Writing Claude Code's Keychain item evicts it from that item's
+        // partition list, so Claude Code then asks for the login-keychain password on every
+        // token read — and restoring the list needs that password, so there's no silent fix.
+        fail("""
+        `switch` was removed in 1.6.2.
+
+        It had to write Claude Code's own Keychain item, and any such write evicts Claude Code
+        from that item's partition list — after which Claude Code prompts for your login
+        keychain password on every token read (~every 20 minutes). It can't be repaired
+        without your password, so the feature is gone rather than patched.
+
+        Change accounts with Claude Code's own login:  claude /login
+
+        If you're already stuck in the prompt loop, this fixes it (one password, then permanent
+        — it pins Claude Code's TEAM, so its auto-updates don't re-break it):
+
+          security set-generic-password-partition-list \\
+            -S "apple-tool:,teamid:Q6L2SF6YDW,teamid:83XUJJQQL9" \\
+            -s "Claude Code-credentials" -a "$USER"
+        """)
     case "capture":
         guard let l = args.dropFirst(2).first else { fail("usage: headroom claude-accounts capture <label>"); break }
         report(await ClaudeAccounts.capture(label: l))
@@ -109,7 +130,7 @@ case "claude-accounts", "accounts":
         guard let l = args.dropFirst(2).first else { fail("usage: headroom claude-accounts remove <label>"); break }
         report(ClaudeAccounts.remove(l))
     default:
-        print("usage: headroom claude-accounts [list|status|reconcile|switch <label>|capture <label>|remove <label>]")
+        print("usage: headroom claude-accounts [list|status|reconcile|capture <label>|remove <label>]")
     }
 default:
     print("usage: headroom [usage|doctor|history [days]|spend|claude-accounts …]")

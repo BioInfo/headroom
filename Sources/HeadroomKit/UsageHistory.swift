@@ -1,7 +1,7 @@
 import Foundation
 
 /// One day's token throughput (Claude local logs). `tokens` = input + output + cache.
-public struct TokenDay: Codable, Sendable, Identifiable {
+public struct TokenDay: Codable, Sendable, Identifiable, Equatable {
     public let day: Date          // local midnight of the day
     public let tokens: Int
     public var id: Date { day }
@@ -90,50 +90,66 @@ public final class UsageHistory {
 
     // MARK: - layer 2: Claude token backfill (from local JSONL logs)
 
-    /// Sum Claude Code token throughput per local day over the last `days`. Parses only
-    /// log files modified within the window (+1 day slack). Off-main: call from a Task.
+    /// Extract `(timestamp, tokens)` from one Claude Code transcript JSONL line, or nil if it
+    /// isn't a token-bearing record. Pure + testable (no filesystem).
+    nonisolated static func parseClaudeTokenLine(_ line: String, iso: ISO8601DateFormatter,
+                                                 isoPlain: ISO8601DateFormatter) -> (Date, Int)? {
+        guard line.contains("input_tokens"),
+              let data = line.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let ts = obj["timestamp"] as? String,
+              let msg = obj["message"] as? [String: Any],
+              let usage = msg["usage"] as? [String: Any] else { return nil }
+        guard let when = iso.date(from: ts) ?? isoPlain.date(from: ts) else { return nil }
+        let t = (usage["input_tokens"] as? Int ?? 0)
+              + (usage["output_tokens"] as? Int ?? 0)
+              + (usage["cache_creation_input_tokens"] as? Int ?? 0)
+              + (usage["cache_read_input_tokens"] as? Int ?? 0)
+        return (when, t)
+    }
+
+    /// Sum Claude Code token throughput per local day over the last `days`. Uncached
+    /// convenience — the app passes a `TokenScanCache` so repeat scans only parse changed
+    /// files. Off-main: call from a Task.
     public nonisolated static func claudeTokenSeries(days: Int = 90) async -> [TokenDay] {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let root = home.appendingPathComponent(".claude/projects", isDirectory: true)
-        let fm = FileManager.default
-        guard let en = fm.enumerator(at: root, includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey]) else {
-            return []
-        }
+        (await claudeTokenSeries(days: days, cache: TokenScanCache())).series
+    }
+
+    /// Cache-aware Claude token scan: reuse each unchanged file's parsed records, re-parse
+    /// only new/modified files, and return the updated cache for the caller to persist. The
+    /// returned cache contains exactly the files seen this scan (deleted/aged-out entries
+    /// fall away).
+    public nonisolated static func claudeTokenSeries(days: Int, cache: TokenScanCache,
+                                                     roots: [URL]? = nil) async -> (series: [TokenDay], cache: TokenScanCache) {
+        let roots = roots ?? [FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude/projects", isDirectory: true)]
         let cal = Calendar.current
         let windowStart = cal.startOfDay(for: Date()).addingTimeInterval(-Double(days) * 86400)
-        let fileCutoff = windowStart.addingTimeInterval(-86400)   // a session can straddle midnight
-
-        var totals: [Date: Int] = [:]
-        let iso = ISO8601DateFormatter()
-        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let iso = ISO8601DateFormatter(); iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let isoPlain = ISO8601DateFormatter()
 
-        let urls = (en.allObjects as? [URL]) ?? []
-        for url in urls {
-            guard url.pathExtension == "jsonl" else { continue }
-            let vals = try? url.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey])
-            guard vals?.isRegularFile == true,
-                  let m = vals?.contentModificationDate, m >= fileCutoff else { continue }
+        var next = TokenScanCache()
+        // A session can straddle midnight, so admit files a day older than the window.
+        for (url, mtime, size) in SpendUsage.jsonlFilesWithMeta(under: roots,
+                                                                modifiedAfter: windowStart.addingTimeInterval(-86400)) {
+            if let hit = cache.entry(for: url.path, mtime: mtime, size: size) {
+                next.files[url.path] = hit
+                continue
+            }
+            // Parse the whole file (no window filter here — the cache outlives this window;
+            // `merged` applies the cutoff).
+            var hits: [(when: Date, tokens: Int)] = []
             do {
                 for try await line in url.lines {
-                    guard line.contains("input_tokens"),
-                          let data = line.data(using: .utf8),
-                          let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                          let ts = obj["timestamp"] as? String,
-                          let msg = obj["message"] as? [String: Any],
-                          let usage = msg["usage"] as? [String: Any] else { continue }
-                    let when = iso.date(from: ts) ?? isoPlain.date(from: ts)
-                    guard let when, when >= windowStart else { continue }
-                    let day = cal.startOfDay(for: when)
-                    let t = (usage["input_tokens"] as? Int ?? 0)
-                          + (usage["output_tokens"] as? Int ?? 0)
-                          + (usage["cache_creation_input_tokens"] as? Int ?? 0)
-                          + (usage["cache_read_input_tokens"] as? Int ?? 0)
-                    totals[day, default: 0] += t
+                    guard let h = parseClaudeTokenLine(line, iso: iso, isoPlain: isoPlain) else { continue }
+                    hits.append(h)
                 }
             } catch { continue }
+            next.files[url.path] = TokenScanCache.FileScan(mtime: mtime.timeIntervalSince1970, size: size,
+                                                           recs: TokenScanCache.recs(from: hits, calendar: cal))
         }
-        return totals.map { TokenDay(day: $0.key, tokens: $0.value) }.sorted { $0.day < $1.day }
+        let totals = next.merged(windowStart: windowStart)
+        return (totals.map { TokenDay(day: $0.key, tokens: $0.value) }.sorted { $0.day < $1.day }, next)
     }
 
     // MARK: - layer 2 (cont.): Codex token backfill (from ~/.codex rollout JSONL)
@@ -151,6 +167,18 @@ public final class UsageHistory {
         case "claude": await claudeTokenSeries(days: days)
         case "codex":  await codexTokenSeries(days: days)
         default:       []
+        }
+    }
+
+    /// Cache-aware `tokenSeries`. The app uses this so a refresh only parses files that
+    /// actually changed — the uncached form re-reads the whole corpus (8+ GB on a heavy
+    /// tree) and must never sit on a repeating refresh tick.
+    public nonisolated static func tokenSeries(for provider: String, days: Int,
+                                               cache: TokenScanCache) async -> (series: [TokenDay], cache: TokenScanCache) {
+        switch provider {
+        case "claude": await claudeTokenSeries(days: days, cache: cache)
+        case "codex":  await codexTokenSeries(days: days, cache: cache)
+        default:       ([], cache)
         }
     }
 
@@ -178,34 +206,39 @@ public final class UsageHistory {
     /// under `~/.codex/sessions` (+ `archived_sessions`). Mirrors `claudeTokenSeries`: parse
     /// only files modified within the window. Off-main: call from a Task.
     public nonisolated static func codexTokenSeries(days: Int = 182) async -> [TokenDay] {
+        (await codexTokenSeries(days: days, cache: TokenScanCache())).series
+    }
+
+    /// Cache-aware Codex token scan. Mirrors `claudeTokenSeries(days:cache:roots:)`.
+    public nonisolated static func codexTokenSeries(days: Int, cache: TokenScanCache,
+                                                    roots: [URL]? = nil) async -> (series: [TokenDay], cache: TokenScanCache) {
         let home = FileManager.default.homeDirectoryForCurrentUser
-        let roots = [home.appendingPathComponent(".codex/sessions", isDirectory: true),
-                     home.appendingPathComponent(".codex/archived_sessions", isDirectory: true)]
-        let fm = FileManager.default
+        let roots = roots ?? [home.appendingPathComponent(".codex/sessions", isDirectory: true),
+                              home.appendingPathComponent(".codex/archived_sessions", isDirectory: true)]
         let cal = Calendar.current
         let windowStart = cal.startOfDay(for: Date()).addingTimeInterval(-Double(days) * 86400)
-        let fileCutoff = windowStart.addingTimeInterval(-86400)   // a session can straddle midnight
         let iso = ISO8601DateFormatter(); iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let isoPlain = ISO8601DateFormatter()
 
-        var totals: [Date: Int] = [:]
-        for root in roots {
-            guard let en = fm.enumerator(at: root, includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey]) else { continue }
-            let urls = (en.allObjects as? [URL]) ?? []
-            for url in urls {
-                guard url.pathExtension == "jsonl", url.lastPathComponent.hasPrefix("rollout-") else { continue }
-                let vals = try? url.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey])
-                guard vals?.isRegularFile == true,
-                      let m = vals?.contentModificationDate, m >= fileCutoff else { continue }
-                do {
-                    for try await line in url.lines {
-                        guard let (when, tokens) = parseCodexTokenLine(line, iso: iso, isoPlain: isoPlain),
-                              when >= windowStart else { continue }
-                        totals[cal.startOfDay(for: when), default: 0] += tokens
-                    }
-                } catch { continue }
+        var next = TokenScanCache()
+        for (url, mtime, size) in SpendUsage.jsonlFilesWithMeta(under: roots,
+                                                                modifiedAfter: windowStart.addingTimeInterval(-86400)) {
+            guard url.lastPathComponent.hasPrefix("rollout-") else { continue }
+            if let hit = cache.entry(for: url.path, mtime: mtime, size: size) {
+                next.files[url.path] = hit
+                continue
             }
+            var hits: [(when: Date, tokens: Int)] = []
+            do {
+                for try await line in url.lines {
+                    guard let h = parseCodexTokenLine(line, iso: iso, isoPlain: isoPlain) else { continue }
+                    hits.append(h)
+                }
+            } catch { continue }
+            next.files[url.path] = TokenScanCache.FileScan(mtime: mtime.timeIntervalSince1970, size: size,
+                                                           recs: TokenScanCache.recs(from: hits, calendar: cal))
         }
-        return totals.map { TokenDay(day: $0.key, tokens: $0.value) }.sorted { $0.day < $1.day }
+        let totals = next.merged(windowStart: windowStart)
+        return (totals.map { TokenDay(day: $0.key, tokens: $0.value) }.sorted { $0.day < $1.day }, next)
     }
 }

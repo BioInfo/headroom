@@ -5,6 +5,24 @@ All notable changes to Headroom are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.2] - 2026-07-17
+
+### Removed
+- **Switching Claude accounts.** It cannot be done safely and is gone. Switching had to write Claude Code's own Keychain item, and on macOS *any* write to another app's Keychain item silently rewrites that item's **partition list** to the writing program's identity, evicting the owner. After a switch, Claude Code had to ask for your login keychain password every time it read its own token — roughly every 20 minutes, indefinitely. Nothing in 1.6.0/1.6.1 hinted at this, because the trusted-application list (the gate everyone looks at) really is preserved by a write; the partition list is a second, independent gate, and that is the one a write destroys. It is also not repairable from inside the app: restoring a partition list is itself a privileged operation that demands your keychain password. So the honest fix is to stop writing, not to patch the write. **Change accounts with Claude Code's own `claude /login`.** Saved accounts, their cards, and the ACTIVE marker all still work — Headroom reads Claude Code's credentials and never writes them.
+
+  If 1.6.0 or 1.6.1 already left you with repeating password prompts, this fixes it permanently (one password, once). It pins Claude Code's signing **team** (`Q6L2SF6YDW`) rather than a specific build, so Claude Code's auto-updates will not break it again. `83XUJJQQL9` is Headroom's own team, which is what lets the Claude meter keep reading without asking you:
+
+  ```
+  security set-generic-password-partition-list \
+    -S "apple-tool:,teamid:Q6L2SF6YDW,teamid:83XUJJQQL9" \
+    -s "Claude Code-credentials" -a "$USER"
+  ```
+
+  Note that `-S` **replaces** the partition list rather than adding to it. If another tool also reads your Claude credentials, it will have to ask for permission once more afterwards (it re-adds itself; nothing is lost). To see what is there first, run `security dump-keychain | grep -A2 "Claude Code-credentials"`, or just run the command above and re-approve anything that asks.
+
+### Fixed
+- **Headroom could pin a CPU core indefinitely.** The token-history scan had no cache and re-read every Claude and Codex session log inside a 182-day window on launch *and* on every refresh tick. On a heavy tree that is 12,508 files and 8.56 GB per pass — a single pass measured 4.5 minutes of CPU, far longer than the refresh interval itself, so it never caught up. History now uses the same per-file cache the Spend panel already had: the first pass parses everything, and later passes only re-read files that actually changed. Measured on the same logs: **271s cold, 0.85s warm.** The numbers it reports are unchanged.
+
 ## [1.6.1] - 2026-07-16
 
 ### Fixed

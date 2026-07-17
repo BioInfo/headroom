@@ -3,6 +3,15 @@
     <channel>
         <title>Headroom</title>
         <item>
+            <title>1.6.2</title>
+            <pubDate>Fri, 17 Jul 2026 09:40:00 -0400</pubDate>
+            <sparkle:version>1.6.2</sparkle:version>
+            <sparkle:shortVersionString>1.6.2</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/BioInfo/headroom/releases/download/v1.6.2/Headroom-1.6.2.zip" length="2611626" type="application/octet-stream" sparkle:edSignature="eI/xj77Aya9dpFLR3xdpRVa4ZnWMAaulNWdg8xppsVPgq1j65skyG5rWuOwROEt5sxZ4rNN1h2QtDMLVHmg/BA=="/>
+        </item>
+        <item>
             <title>1.6.1</title>
             <pubDate>Thu, 16 Jul 2026 15:20:00 -0400</pubDate>
             <sparkle:version>1.6.1</sparkle:version>

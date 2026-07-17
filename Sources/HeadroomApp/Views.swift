@@ -111,8 +111,7 @@ struct MenuContent: View {
                         model.loginTargetID = usage.provider
                         surface("login")
                     },
-                                 onSettings: { openSettings() },
-                                 onSwitchClaude: { model.switchClaudeAccount($0) })
+                                 onSettings: { openSettings() })
                 }
             }
 
@@ -282,7 +281,6 @@ struct ProviderCard: View {
     var onLogin: () -> Void
     var onSettings: () -> Void = {}
     /// Flip the live Claude account (in-app, via `ClaudeAccounts`). Passed only for Claude cards.
-    var onSwitchClaude: ((String) -> Void)? = nil
 
     /// Stale data, or a refresh in flight over a still-shown reading: dim the meters so
     /// the number reads as "not live right now" without the card flashing to empty.
@@ -308,22 +306,17 @@ struct ProviderCard: View {
                     .background(skin.clay, in: Capsule())
                     .fixedSize()
             }
-            if let cs = claudeSwitch {
-                if cs.isActive {
-                    Text("ACTIVE")
-                        .font(.caption2.weight(.bold)).foregroundStyle(skin.ramp(.healthy))
-                        .padding(.horizontal, 5).padding(.vertical, 1.5)
-                        .background(skin.ramp(.healthy).opacity(0.15), in: Capsule())
-                        .fixedSize()
-                        .help("This is the live Claude account for the CLI")
-                } else {
-                    Button { onSwitchClaude?(cs.label) } label: {
-                        Text("Switch").font(.caption2.weight(.semibold))
-                    }
-                    .buttonStyle(.borderless).tint(skin.clay)
+            // Read-only: the ACTIVE chip marks the live account. There is no Switch button —
+            // writing Claude Code's Keychain item evicts it from that item's partition list
+            // and leaves a password prompt every ~20 minutes that we can't silently repair
+            // (see ClaudeAccounts.switchTo). Change accounts with `claude /login`.
+            if let cs = claudeSwitch, cs.isActive {
+                Text("ACTIVE")
+                    .font(.caption2.weight(.bold)).foregroundStyle(skin.ramp(.healthy))
+                    .padding(.horizontal, 5).padding(.vertical, 1.5)
+                    .background(skin.ramp(.healthy).opacity(0.15), in: Capsule())
                     .fixedSize()
-                    .help("Make this the active Claude account for the Claude Code CLI (takes effect for new sessions)")
-                }
+                    .help("This is the live Claude account for the CLI")
             }
             if peak {
                 Image(systemName: "flame.fill")

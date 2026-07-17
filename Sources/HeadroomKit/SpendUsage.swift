@@ -252,7 +252,8 @@ public enum SpendUsage {
 
     /// JSONL files under `roots` modified after `cutoff`, with the (mtime, size) identity
     /// the scan cache validates against.
-    nonisolated private static func jsonlFilesWithMeta(under roots: [URL], modifiedAfter cutoff: Date)
+    /// Shared with `UsageHistory`'s token scanners, which walk the same trees.
+    nonisolated static func jsonlFilesWithMeta(under roots: [URL], modifiedAfter cutoff: Date)
         -> [(url: URL, mtime: Date, size: Int)] {
         let fm = FileManager.default
         let keys: [URLResourceKey] = [.contentModificationDateKey, .isRegularFileKey, .fileSizeKey]

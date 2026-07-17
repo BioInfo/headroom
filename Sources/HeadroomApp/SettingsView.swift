@@ -245,8 +245,9 @@ private struct ClaudeAccountsSection: View {
                     }
                     Spacer()
                     if label != active {
-                        Button("Switch") { model.switchClaudeAccount(label) }
-                            .controlSize(.small).buttonStyle(.borderless).tint(skin.clay)
+                        // No "Switch": writing Claude Code's Keychain item evicts it from that
+                        // item's partition list (permanent password prompts, no silent repair).
+                        // Change accounts with `claude /login`. See ClaudeAccounts.switchTo.
                         Button("Remove") {
                             Task { showResult(await model.removeClaudeAccount(label)) }
                         }

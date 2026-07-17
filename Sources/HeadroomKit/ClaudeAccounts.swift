@@ -1,19 +1,23 @@
 import Foundation
 
-/// In-app multi-account Claude management — the Swift port of the old machine-local
-/// `~/scripts/claude-switch`, so Headroom is self-contained (no shell-out).
+/// Read-only multi-account Claude reporting.
 ///
 /// Claude Code keeps its OAuth creds in ONE slot: macOS login-Keychain item
-/// "Claude Code-credentials" (+ a mirror at ~/.claude/.credentials.json). `/login` to a
-/// different account OVERWRITES it. This stashes a full copy of each account's blob under
-/// its own Headroom-owned Keychain item ("Headroom-claude-acct-<label>"), records which is
-/// live in a pointer file, and "switches" by copying the chosen stash back into the live
-/// slot — taking effect for NEW `claude` sessions.
+/// "Claude Code-credentials". `/login` to a different account OVERWRITES it. We *read* that
+/// slot to meter the live account, and let a user stash a copy of each account's blob under
+/// its own Headroom-owned item ("Headroom-claude-acct-<label>") so each account gets its own
+/// card.
 ///
-/// Conventions (service names, pointer path, cred mirror, backup dir) are IDENTICAL to the
-/// old shell tool, so the two remain interoperable if the CLI is ever run alongside.
-/// Every write is verified by reading it back (gate on the artifact, not the exit code);
-/// the token value is never logged.
+/// ## We read Claude Code's credentials. We never write them. (1.6.2)
+/// Switching accounts — copying a stash back into the live slot — was removed. Writing
+/// another app's Keychain item silently rewrites that item's PARTITION LIST to the writing
+/// binary's identity, evicting the owner; Claude Code then prompts for the login-keychain
+/// password on every token read, roughly every 20 minutes, and it cannot be repaired without
+/// the user's password. The full mechanism, the proof, and the recovery command are on
+/// `switchTo`. Use `claude /login` to change accounts.
+///
+/// Writes to our own `Headroom-*` stashes are safe and are verified by reading them back
+/// (gate on the artifact, not the exit code); the token value is never logged.
 public enum ClaudeAccounts {
     public static let liveService = "Claude Code-credentials"
     public static let stashPrefix = "Headroom-claude-acct-"
@@ -47,8 +51,6 @@ public enum ClaudeAccounts {
 
     private static var home: URL { FileManager.default.homeDirectoryForCurrentUser }
     private static var pointerURL: URL { home.appendingPathComponent(".claude/.headroom-active-claude") }
-    private static var credFileURL: URL { home.appendingPathComponent(".claude/.credentials.json") }
-    private static var backupDir: URL { home.appendingPathComponent(".claude/.claude-switch-backups") }
 
     /// The label of the account currently in the live slot, per the pointer file, or nil.
     public static func activeLabel() -> String? {
@@ -61,35 +63,10 @@ public enum ClaudeAccounts {
         try? label.write(to: pointerURL, atomically: true, encoding: .utf8)
     }
 
-    private static func writeCredFile(_ blob: String) {
-        let tmp = credFileURL.appendingPathExtension("tmp")
-        guard let data = blob.data(using: .utf8), (try? data.write(to: tmp, options: .atomic)) != nil else { return }
-        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: tmp.path)
-        try? FileManager.default.removeItem(at: credFileURL)
-        try? FileManager.default.moveItem(at: tmp, to: credFileURL)
-    }
-
-    /// Back up the current live blob before an overwrite; keep the last 20.
-    private static func backupLive(_ blob: String) {
-        let fm = FileManager.default
-        try? fm.createDirectory(at: backupDir, withIntermediateDirectories: true,
-                                attributes: [.posixPermissions: 0o700])
-        let df = DateFormatter(); df.dateFormat = "yyyyMMdd-HHmmss"
-        let f = backupDir.appendingPathComponent("live-\(df.string(from: Date())).json")
-        if let data = blob.data(using: .utf8), (try? data.write(to: f, options: .atomic)) != nil {
-            try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: f.path)
-        }
-        // prune to the newest 20
-        if let files = try? fm.contentsOfDirectory(at: backupDir, includingPropertiesForKeys: [.contentModificationDateKey])
-            .filter({ $0.lastPathComponent.hasPrefix("live-") }) {
-            let sorted = files.sorted {
-                let a = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
-                let b = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
-                return a > b
-            }
-            for old in sorted.dropFirst(20) { try? fm.removeItem(at: old) }
-        }
-    }
+    // NOTE: `writeCredFile` and `backupLive` were removed in 1.6.2 along with `switchTo`.
+    // Both existed only to serve the live-slot write. `writeCredFile` in particular wrote
+    // Claude Code's OWN `~/.claude/.credentials.json` — the same cross-app-write mistake as
+    // the Keychain one, in file form. We read Claude Code's credentials; we never write them.
 
     // MARK: - keychain primitives (blob passes through argv locally; never logged)
 
@@ -114,16 +91,10 @@ public enum ClaudeAccounts {
         }
     }
 
-    /// Update the live slot IN PLACE. `SecItemUpdate` preserves the item's existing ACL, so
-    /// Claude Code keeps reading it without a prompt of its own.
-    ///
-    /// In-process, not `/usr/bin/security`: macOS scopes Keychain trust to the *requesting
-    /// binary*, so every shell-out asked as a fresh, unrelated process and re-prompted —
-    /// three dialogs for one switch. As Headroom.app, one "Always Allow" is permanent.
-    /// It also keeps the token off argv, where `ps` could read it.
-    @discardableResult private static func writeLive(_ blob: String) -> Bool {
-        KeychainWrite.upsert(service: liveService, account: NSUserName(), value: blob).isOK
-    }
+    // NOTE: there is deliberately no `writeLive`. Writing `Claude Code-credentials` evicts
+    // Claude Code from that item's Keychain partition list and condemns the user to a
+    // password prompt every ~20 minutes, unfixable without their keychain password. See the
+    // long note on `switchTo`. We read the live slot; we never write it.
     @discardableResult private static func writeStash(_ label: String, _ blob: String) -> Bool {
         KeychainWrite.upsert(service: stashPrefix + label, account: NSUserName(), value: blob).isOK
     }
@@ -292,85 +263,49 @@ public enum ClaudeAccounts {
 
     /// Make `label` the live account.
     ///
-    /// The order here is the whole fix, and every step is load-bearing:
-    ///  1. **Verify who is live** via `account.uuid` — never the pointer, which `/login`
-    ///     silently invalidates. Unknown ⇒ refuse; a blind capture-away overwrites a *different*
-    ///     account's credentials.
-    ///  2. **Capture-away by identity**, into the stash that actually holds that uuid.
-    ///  3. **Refresh the target before writing it.** A stash is a frozen copy of a rotating
-    ///     credential and is very likely already void — writing it into the live slot is what
-    ///     logged people out (replaying a rotated refresh token gets the family revoked).
-    ///  4. **Persist the rotation to the stash BEFORE the live write**, so a crash mid-switch
-    ///     can't strand the account with a token nobody recorded.
-    ///  5. Write live + cred mirror, verify by readback.
-    @discardableResult
+    /// ## REMOVED in 1.6.2 — and it must not come back. Read this before rewiring it.
+    ///
+    /// Switching required writing Claude Code's own `Claude Code-credentials` Keychain item.
+    /// **Any write to another app's Keychain item silently rewrites that item's PARTITION
+    /// LIST to the writing binary's identity, evicting the owner.** Proven directly:
+    ///
+    /// ```
+    /// partitions BEFORE:  ["apple-tool:"]
+    /// SecItemUpdate -> OK
+    /// partitions AFTER:   ["cdhash:<the writer>"]     // the previous entry is GONE
+    /// ```
+    ///
+    /// So every switch kicked `teamid:Q6L2SF6YDW` (Claude Code) out and left
+    /// `teamid:83XUJJQQL9` (us) behind. Claude Code then had to prompt for the login-keychain
+    /// password on **every** token read — about every 20 minutes, forever. It is not
+    /// self-healing and we cannot repair it silently: rewriting a partition list is itself a
+    /// CHANGE-ACL operation, whose ACL is an empty trusted list, so it always demands the
+    /// user's keychain password. There is no unattended fix, which is why the feature is gone
+    /// rather than patched.
+    ///
+    /// The old ACL/trusted-app reasoning was not wrong, it was just aimed at the wrong gate —
+    /// `SecItemUpdate` and `security add-generic-password -U` both *do* preserve the
+    /// trusted-app ACL (verified). The partition list is a second, independent gate, and that
+    /// is the one a write destroys.
+    ///
+    /// Recovery for anyone already hit (one prompt, then permanent — pin the **team**, not a
+    /// cdhash, or Claude Code's next auto-update breaks it again):
+    /// ```
+    /// security set-generic-password-partition-list \
+    ///   -S "apple-tool:,teamid:Q6L2SF6YDW,teamid:83XUJJQQL9" \
+    ///   -s "Claude Code-credentials" -a "$USER"
+    /// ```
+    ///
+    /// Reading the live slot stays fine — reads touch nothing. `capture`/`remove` are fine too:
+    /// they only ever write `Headroom-claude-acct-*`, items we own. To change accounts, use
+    /// Claude Code's own `/login`; it owns that credential and rotates it out from under any
+    /// copy we could hold anyway (see `ClaudeRefresh`).
+    ///
+    /// Prior art we should have believed: CodexBar (60 providers) refuses to own this surface
+    /// for the same reason.
+    @available(*, unavailable, message: "Removed in 1.6.2: writing Claude Code's Keychain item evicts it from the item's partition list, causing permanent password prompts with no silent repair. Use `claude /login` to change accounts.")
     public static func switchTo(_ label: String) async -> Result<String, OpError> {
-        guard let targetBlob = readStash(label), ClaudeCreds.parse(targetBlob) != nil else {
-            return .failure(OpError(message: "No saved account “\(label)”."))
-        }
-        var idx = loadIndex()
-
-        // 1-2. Identify the live account, then file it where it actually belongs.
-        if let live = readLive(), ClaudeCreds.parse(live) != nil {
-            backupLive(live)
-            guard let liveID = await identify(blob: live) else {
-                return .failure(OpError(message: "Couldn't confirm which account is logged in right now (expired token, or no network). Not switching — guessing here could overwrite another saved account's credentials."))
-            }
-            if let target = idx.accounts[label], target.uuid == liveID.accountUUID {
-                idx.activeLabel = label; saveIndex(idx)
-                return .success("Already signed in as “\(label)” (\(liveID.summary())).")
-            }
-            // An install that predates the index has labels but no uuids, so nothing resolves
-            // yet. Bind them once, on demand, rather than making an existing multi-account user
-            // re-save every account to earn a switch. Read-only, so it can't do harm.
-            if idx.label(forUUID: liveID.accountUUID) == nil, idx.accounts.isEmpty {
-                idx = await reconcile()
-            }
-            if let awayLabel = idx.label(forUUID: liveID.accountUUID) {
-                if writeStash(awayLabel, live) { idx.record(label: awayLabel, identity: liveID) }
-            } else {
-                return .failure(OpError(message: "The account signed in right now (\(liveID.summary())) isn't saved yet. Save it first (Settings → Claude accounts → Add current account), or switching would lose its sign-in."))
-            }
-        }
-
-        // 3. Refresh the target — never write a frozen token into the live slot.
-        guard let targetCreds = ClaudeCreds.parse(targetBlob),
-              let targetRefresh = targetCreds.refreshToken else {
-            return .failure(OpError(message: "Saved account “\(label)” has no refresh token — sign in again with `claude` and re-save it."))
-        }
-        let fresh: ClaudeRefresh.Fresh
-        switch await ClaudeRefresh.refresh(refreshToken: targetRefresh) {
-        case .success(let f):
-            fresh = f
-        case .failure(.revoked):
-            return .failure(OpError(message: "“\(label)” has been signed out (its saved token is no longer valid). Run `claude` and sign in to that account, then save it again."))
-        case .failure(let e):
-            return .failure(OpError(message: "Couldn't refresh “\(label)” (\(e)). Check your connection and try again — nothing was changed."))
-        }
-        guard let freshBlob = ClaudeRefresh.apply(fresh, to: targetBlob) else {
-            return .failure(OpError(message: "Couldn't apply the refreshed token to “\(label)”."))
-        }
-
-        // 4. Persist the rotation first — the old refresh token is already void server-side.
-        guard writeStash(label, freshBlob) else {
-            return .failure(OpError(message: "Couldn't save the refreshed token for “\(label)” — not switching, so nothing is lost."))
-        }
-        idx.record(label: label, identity: idx.accounts[label].map {
-            ClaudeIdentity(accountUUID: $0.uuid, email: $0.email, organizationName: $0.organizationName)
-        } ?? ClaudeIdentity(accountUUID: "unknown"))
-
-        // 5. Go live, and gate on the artifact.
-        guard writeLive(freshBlob) else {
-            return .failure(OpError(message: "Couldn't write the live Keychain slot — try again."))
-        }
-        writeCredFile(freshBlob)
-        guard readLive() == freshBlob else {
-            return .failure(OpError(message: "Live slot didn't update (Keychain readback mismatch)."))
-        }
-        idx.activeLabel = label
-        saveIndex(idx)
-        let who = idx.accounts[label]?.email ?? label
-        return .success("Switched to “\(label)” (\(who)). Start a new `claude` session to use it.")
+        .failure(OpError(message: "Switching accounts was removed in 1.6.2 — use `claude /login`."))
     }
 
     /// Delete a stash. Refuses the currently-active account (switch away first).
