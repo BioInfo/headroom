@@ -107,6 +107,7 @@ struct MenuContent: View {
                                  canKey: model.keyService(for: usage.provider) != nil,
                                  peak: model.peakHoursActive && usage.provider.hasPrefix("claude"),
                                  claudeSwitch: model.claudeSwitchInfo(for: usage.provider),
+                                 signedOut: model.isClaudeAccountSignedOut(usage.provider),
                                  onLogin: {
                         model.loginTargetID = usage.provider
                         surface("login")
@@ -278,6 +279,9 @@ struct ProviderCard: View {
     /// For a Claude account card: the switch label + whether it's the live account. nil for
     /// other cards (and before the second Claude account exists). Drives the header Active/Switch chip.
     var claudeSwitch: (label: String, isActive: Bool)? = nil
+    /// This Claude account's saved token has been signed out (invalid_grant). Distinct from a
+    /// generic read error: it names the fix (`claude /login` + re-save) instead of dead-ending.
+    var signedOut: Bool = false
     var onLogin: () -> Void
     var onSettings: () -> Void = {}
     /// Flip the live Claude account (in-app, via `ClaudeAccounts`). Passed only for Claude cards.
@@ -356,7 +360,12 @@ struct ProviderCard: View {
                         .font(.caption).foregroundStyle(skin.faint)
                 }
             case .error:
-                Text("Couldn't read usage.").font(.caption).foregroundStyle(skin.faint)
+                if signedOut {
+                    Text("Signed out. Run `claude /login` to this account, then re-save it in Settings.")
+                        .font(.caption).foregroundStyle(skin.faint).fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Text("Couldn't read usage.").font(.caption).foregroundStyle(skin.faint)
+                }
             case .ok, .stale:
                 if usage.metrics.isEmpty {
                     Text("No meters reported.").font(.caption).foregroundStyle(skin.faint)

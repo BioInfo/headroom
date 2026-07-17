@@ -211,6 +211,42 @@ final class AppModel {
     // `ClaudeAccounts.switchTo`. Accounts are changed with Claude Code's own `/login`; the
     // cards stay read-only.
 
+    /// Labels whose stash is dead (`invalid_grant`) and needs `claude /login` + re-capture.
+    /// Read from the index so the card can say *why* it's blank instead of "couldn't read".
+    private(set) var signedOutClaudeLabels: Set<String> = []
+
+    /// Whether a Claude account card's stash has been signed out — drives the card's
+    /// actionable "run claude /login" message instead of a dead-end "couldn't read".
+    func isClaudeAccountSignedOut(_ providerID: String) -> Bool {
+        guard let label = ClaudeAccounts.label(forProviderID: providerID) else { return false }
+        return signedOutClaudeLabels.contains(label)
+    }
+
+    /// Renew every non-active account's stashed token so its card can actually read usage.
+    ///
+    /// A stash is a frozen copy of a credential whose access token dies in hours — that is why
+    /// the Business card decayed to "couldn't read usage". Refreshing it writes ONLY our own
+    /// `Headroom-claude-acct-*` item, never Claude Code's, so it cannot repeat the 1.6.2
+    /// partition-list eviction. Cheap: `refreshStashIfNeeded` no-ops while the token is valid,
+    /// so this is a couple of parses per tick, and a revoked stash is marked sticky and never
+    /// retried.
+    private func refreshStashedClaudeTokens() async {
+        let labels = claudeAccountLabels.filter { $0 != activeClaudeLabel }
+        guard !labels.isEmpty else { return }
+        for label in labels {
+            let r = await Task.detached(priority: .utility) {
+                await ClaudeAccounts.refreshStashIfNeeded(label)
+            }.value
+            switch r {
+            case .refreshed:      NSLog("[Headroom] stash '\(label)': refreshed")
+            case .notNeeded:      NSLog("[Headroom] stash '\(label)': token still valid")
+            case .signedOut:      NSLog("[Headroom] stash '\(label)': signed out (invalid_grant) — needs re-login")
+            case .failed(let w):  NSLog("[Headroom] stash '\(label)': deferred (\(w))")   // transient
+            }
+        }
+        signedOutClaudeLabels = ClaudeAccounts.signedOutLabels()
+    }
+
     /// Capture the currently-logged-in Claude account under a user-typed name: stash it,
     /// remember the nice display name, enable its card, refresh. Returns a message to show.
     /// Keychain work runs off the main actor so a slow first Keychain access can't freeze the
@@ -409,6 +445,7 @@ final class AppModel {
         isRefreshing = true
         defer { isRefreshing = false }
         refreshClaudeAccountLabels()   // pick up accounts captured/removed outside the app (e.g. the CLI)
+        await refreshStashedClaudeTokens()   // a stash's token expires in hours; renew before we read it
         let now = Date()
         // The per-provider due-check is measured against this base. The loop passes the
         // cycle's base (fixed or adaptive); non-loop callers (manual, wake, key/enable)

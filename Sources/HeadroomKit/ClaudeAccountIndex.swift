@@ -19,11 +19,27 @@ public struct ClaudeAccountIndex: Equatable, Sendable {
         public var organizationName: String?
         /// When we last confirmed this label→uuid binding against the profile endpoint.
         public var verifiedAt: Date?
+        /// Set when this stash's refresh token came back `invalid_grant` — the account has
+        /// been signed out (or its token family was revoked) and the stash is dead.
+        ///
+        /// **This marker is load-bearing, not cosmetic.** A refresh token is single-use:
+        /// presenting a rotated one is a *replay*, which is the documented trigger for OAuth
+        /// replay detection. Without a sticky marker we would re-present the same dead token
+        /// on every refresh tick — hammering Anthropic with something that looks exactly like
+        /// an attack. One failure per stash, then never again until re-captured.
+        public var signedOutAt: Date?
+        /// Don't attempt a refresh again before this time. Set after a TRANSIENT failure
+        /// (429, network, unexpected 5xx) so a stash whose token is expired isn't retried on
+        /// every ~3-minute tick — which is how the refresh endpoint 429s us in the first place.
+        /// A stash token lasts hours, so backing off tens of minutes costs nothing.
+        public var refreshRetryAfter: Date?
 
         public init(uuid: String, email: String? = nil,
-                    organizationName: String? = nil, verifiedAt: Date? = nil) {
+                    organizationName: String? = nil, verifiedAt: Date? = nil,
+                    signedOutAt: Date? = nil, refreshRetryAfter: Date? = nil) {
             self.uuid = uuid; self.email = email
             self.organizationName = organizationName; self.verifiedAt = verifiedAt
+            self.signedOutAt = signedOutAt; self.refreshRetryAfter = refreshRetryAfter
         }
     }
 
@@ -42,12 +58,55 @@ public struct ClaudeAccountIndex: Equatable, Sendable {
         accounts.first { $0.value.uuid == uuid }?.key
     }
 
+    /// Record a verified label→uuid binding. Clears any `signedOutAt` marker: we only get
+    /// here from a live, working credential, which is proof the stash is good again.
     public mutating func record(label: String, identity: ClaudeIdentity, at now: Date = Date()) {
         accounts[label] = Entry(uuid: identity.accountUUID,
                                 email: identity.email,
                                 organizationName: identity.organizationName,
-                                verifiedAt: now)
+                                verifiedAt: now,
+                                signedOutAt: nil,
+                                refreshRetryAfter: nil)   // a live cred clears any backoff too
     }
+
+    /// May we attempt to refresh this stash now? False while signed out (terminal) or inside a
+    /// transient-failure backoff window. An unknown label is refreshable (no entry → no bar).
+    public func canRefresh(_ label: String, now: Date = Date()) -> Bool {
+        guard let e = accounts[label] else { return true }
+        if e.signedOutAt != nil { return false }
+        if let after = e.refreshRetryAfter, now < after { return false }
+        return true
+    }
+
+    /// Back off after a transient refresh failure. Stubs an entry if needed (a shell-tool
+    /// stash has none), same as `markSignedOut`.
+    public mutating func backOffRefresh(label: String, until: Date) {
+        var e = accounts[label] ?? Entry(uuid: "unknown")
+        e.refreshRetryAfter = until
+        accounts[label] = e
+    }
+
+    /// Clear a transient backoff after a successful refresh (or a no-longer-needed one).
+    public mutating func clearRefreshBackoff(label: String) {
+        guard var e = accounts[label] else { return }
+        e.refreshRetryAfter = nil
+        accounts[label] = e
+    }
+
+    /// Mark a stash dead after `invalid_grant`. Sticky — see `Entry.signedOutAt`.
+    ///
+    /// Creates a stub entry if the label isn't known yet: a stash captured by the old shell
+    /// tool (or any pre-index install) has no index entry, and the marker MUST still stick, or
+    /// the dead refresh token gets replayed on every tick — the exact abuse the marker
+    /// prevents. `uuid: "unknown"` is fine; a later verified re-capture overwrites it via
+    /// `record`.
+    public mutating func markSignedOut(label: String, at now: Date = Date()) {
+        var e = accounts[label] ?? Entry(uuid: "unknown")
+        e.signedOutAt = now
+        accounts[label] = e
+    }
+
+    public func isSignedOut(_ label: String) -> Bool { accounts[label]?.signedOutAt != nil }
 
     public mutating func forget(label: String) {
         accounts.removeValue(forKey: label)
@@ -64,6 +123,8 @@ public struct ClaudeAccountIndex: Equatable, Sendable {
             if let v = e.email { d["email"] = v }
             if let v = e.organizationName { d["organizationName"] = v }
             if let v = e.verifiedAt { d["verifiedAt"] = v.timeIntervalSince1970 }
+            if let v = e.signedOutAt { d["signedOutAt"] = v.timeIntervalSince1970 }
+            if let v = e.refreshRetryAfter { d["refreshRetryAfter"] = v.timeIntervalSince1970 }
             accts[label] = d
         }
         out["accounts"] = accts
@@ -81,7 +142,9 @@ public struct ClaudeAccountIndex: Equatable, Sendable {
                     uuid: uuid,
                     email: d["email"] as? String,
                     organizationName: d["organizationName"] as? String,
-                    verifiedAt: (d["verifiedAt"] as? Double).map { Date(timeIntervalSince1970: $0) })
+                    verifiedAt: (d["verifiedAt"] as? Double).map { Date(timeIntervalSince1970: $0) },
+                    signedOutAt: (d["signedOutAt"] as? Double).map { Date(timeIntervalSince1970: $0) },
+                    refreshRetryAfter: (d["refreshRetryAfter"] as? Double).map { Date(timeIntervalSince1970: $0) })
             }
         }
         return idx

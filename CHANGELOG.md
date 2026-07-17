@@ -5,6 +5,15 @@ All notable changes to Headroom are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.3] - 2026-07-17
+
+### Fixed
+- **A saved account's card said "couldn't read usage" after a few hours.** A saved account is a frozen copy of a credential, and its access token expires within hours — so every card except the live one decayed into an error and stayed there. Headroom now renews a saved account's token in the background before reading it, so those cards keep working.
+
+  This is deliberately *not* the operation removed in 1.6.2. Renewing a saved account writes only Headroom's own Keychain item, never Claude Code's, so it cannot evict Claude Code from that item's partition list and it never races Claude Code for a credential Claude Code is rotating — a saved account is one the CLI is not signed into, so nothing else is touching it.
+
+  If a saved account has genuinely been signed out, Headroom records that once and stops trying. A refresh token is single-use, so re-presenting a dead one on every refresh would look exactly like an attack; the card tells you to sign in again and re-save instead.
+
 ## [1.6.2] - 2026-07-17
 
 ### Removed

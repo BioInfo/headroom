@@ -102,6 +102,85 @@ public enum ClaudeAccounts {
         KeychainWrite.delete(service: stashPrefix + label, account: NSUserName()).isOK
     }
 
+    // MARK: - stash refresh (keeps a non-live account's card readable)
+
+    public enum StashRefresh: Equatable, Sendable {
+        case notNeeded          // the stashed access token is still usable
+        case refreshed          // rotated and persisted to the stash
+        case signedOut          // invalid_grant — terminal, marked sticky, never retried
+        case failed(String)     // transient (network / unexpected HTTP); safe to retry later
+    }
+
+    /// Refresh a STASHED account's token in place, so its card can read usage instead of
+    /// decaying into "couldn't read".
+    ///
+    /// ## Why this is safe, when writing the live slot was not
+    /// This only ever writes `Headroom-claude-acct-<label>` — an item **we** own and are the
+    /// only reader of. It never touches `Claude Code-credentials`, so it cannot evict Claude
+    /// Code from that item's Keychain partition list (the 1.6.2 defect — see `switchTo`), and
+    /// it never races Claude Code for a credential Claude Code is actively rotating. A stash
+    /// belongs to an account the CLI is *not* signed into, so nobody else is rotating it.
+    ///
+    /// ## Order matters
+    /// `ClaudeRefresh.refresh` rotates server-side: the old refresh token is void the instant
+    /// it succeeds. So persist the result **before** anything else can fail, and gate on a
+    /// readback — an unpersisted rotation strands the account permanently.
+    ///
+    /// A `revoked` result is recorded **stickily** (`Entry.signedOutAt`) because a refresh
+    /// token is single-use: re-presenting a dead one every tick is a replay, and replay is
+    /// what gets a token family revoked in the first place. One attempt, then stop.
+    public static func refreshStashIfNeeded(_ label: String, now: Date = Date()) async -> StashRefresh {
+        // Hard guard: this path must never be pointed at Claude Code's own item.
+        let service = stashPrefix + label
+        guard !label.isEmpty, service != liveService else {
+            return .failed("refusing to refresh the live slot")
+        }
+        guard let blob = readStash(label) else { return .failed("no stash “\(label)”") }
+        guard let creds = ClaudeCreds.parse(blob) else { return .failed("stash “\(label)” isn't a credentials blob") }
+        if creds.isUsable(now: now) { return .notNeeded }
+
+        var idx = loadIndex()
+        if idx.isSignedOut(label) { return .signedOut }          // never replay a dead token
+        // Transient-failure backoff: an expired stash is a refresh CANDIDATE every tick, so
+        // without this a persistent transient error (429, offline) retries every ~3 min and
+        // 429s us harder. `notNeeded` is the honest report — nothing to do right now.
+        guard idx.canRefresh(label, now: now) else { return .notNeeded }
+        guard let refreshToken = creds.refreshToken else {
+            idx.markSignedOut(label: label, at: now); saveIndex(idx)
+            return .signedOut
+        }
+
+        switch await ClaudeRefresh.refresh(refreshToken: refreshToken, now: now) {
+        case .success(let fresh):
+            guard let freshBlob = ClaudeRefresh.apply(fresh, to: blob) else {
+                return .failed("couldn't apply the refreshed token to “\(label)”")
+            }
+            // Persist FIRST and gate on the artifact: the old token is already void.
+            guard writeStash(label, freshBlob), readStash(label) == freshBlob else {
+                return .failed("couldn't save the refreshed token for “\(label)”")
+            }
+            idx.clearRefreshBackoff(label: label); saveIndex(idx)
+            return .refreshed
+        case .failure(.revoked):
+            idx.markSignedOut(label: label, at: now); saveIndex(idx)
+            return .signedOut
+        case .failure(let e):
+            // Transient. Back off so we don't hammer the endpoint (a stash token lasts hours).
+            idx.backOffRefresh(label: label, until: now.addingTimeInterval(backoffInterval)); saveIndex(idx)
+            return .failed("\(e)")
+        }
+    }
+
+    /// Backoff after a transient stash-refresh failure. 30 min: long enough to clear a 429,
+    /// short enough that a genuinely-refreshable stash recovers well within its token's life.
+    static let backoffInterval: TimeInterval = 30 * 60
+
+    /// Labels whose stash is dead and needs `claude /login` + re-capture.
+    public static func signedOutLabels() -> Set<String> {
+        let idx = loadIndex()
+        return Set(idx.accounts.filter { $0.value.signedOutAt != nil }.map(\.key))
+    }
+
     // MARK: - identity index (the pointer is a cache; `account.uuid` is the fact)
 
     private static var indexURL: URL { home.appendingPathComponent(".claude/.headroom-claude-accounts.json") }
