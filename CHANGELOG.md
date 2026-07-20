@@ -5,6 +5,15 @@ All notable changes to Headroom are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.5] - 2026-07-20
+
+### Fixed
+- **The password prompt could still appear (completing the 1.6.4 fix).** 1.6.4 removed the fallback that popped the dialog, but missed a deeper truth: on macOS, *any* attempt to read a keychain item's secret while your app isn't in that item's partition list triggers a system password prompt that **no flag can suppress** (it's the XARA cross-app-access check; verified against Apple's own guidance and confirmed by other menu-bar apps hitting the same wall). Because Claude Code re-scopes the item to itself every time it refreshes its token, Headroom keeps getting evicted, and its next read prompted anyway.
+
+  Headroom now **checks whether it's allowed to read before it reads.** It inspects the item's access list as metadata (which never prompts), and only reads the token if its own signature is present. When it isn't, the Claude card just keeps its last reading until access returns. The result is that Headroom can no longer produce that dialog under any circumstances.
+
+  Honest limitation, stated plainly: because two apps can't both hold read access to one keychain item at the same time on macOS, the live Claude meter is fresh while Headroom is the pinned reader and falls back to its last value while Claude Code is. This is the same constraint that leads other tools to not read Claude Code's keychain at all.
+
 ## [1.6.4] - 2026-07-20
 
 ### Fixed

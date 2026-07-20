@@ -142,6 +142,11 @@ public struct ClaudeCollector: Collector {
     /// reappears fresh the moment our team is back in the partition list. (1.6.4) No-op off macOS.
     static func credsFromKeychain(service: String) -> Creds? {
         #if os(macOS)
+        // Gate on partition membership FIRST (ACL metadata, never prompts). If our team isn't
+        // in the item's partition list we are evicted, and even a no-UI SecItemCopyMatching on
+        // the SECRET triggers the un-suppressible XARA prompt — so we must not attempt it. Skip
+        // to nil (card shows last-good) and self-heal once our team is back in the list. (1.6.5)
+        guard ClaudePartition.admitsSelf(service: service) else { return nil }
         guard case .found(let s) = KeychainRead.noUI(service: service) else { return nil }
         return creds(fromJSON: Data(s.utf8))
         #else

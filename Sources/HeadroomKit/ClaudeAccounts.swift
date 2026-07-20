@@ -90,6 +90,13 @@ public enum ClaudeAccounts {
     static func usesInteractiveFallback(service: String) -> Bool { service != liveService }
 
     private static func readSlot(service: String) -> String? {
+        #if os(macOS)
+        // For the LIVE item, never attempt the read when our team is evicted from its partition
+        // list — even a no-UI SecItemCopyMatching on the secret pops the un-suppressible XARA
+        // prompt. Check ACL membership first (metadata, no prompt); skip to nil if evicted so the
+        // card shows last-good. Our own Headroom-* stashes carry our team, so they're unaffected. (1.6.5)
+        if service == liveService, !ClaudePartition.admitsSelf(service: service) { return nil }
+        #endif
         // In-process no-UI read first: no subprocess, and it can never pop the macOS auth
         // dialog or hang a background path (verified live: reads of both the live slot and
         // stashes succeed silently on an unlocked login keychain).
