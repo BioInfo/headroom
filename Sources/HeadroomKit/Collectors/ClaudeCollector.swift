@@ -130,32 +130,20 @@ public struct ClaudeCollector: Collector {
         return creds(fromJSON: bytes)
     }
 
-    /// macOS login Keychain (the macOS default store). In-process no-UI read first — no
-    /// subprocess, and it can never pop the auth dialog from a background refresh. The
-    /// `/usr/bin/security` fallback covers the rare interaction-required case (existing user
-    /// grants often let it through silently); a timeout keeps a would-prompt read from
-    /// stalling the poll. No-op off macOS.
+    /// macOS login Keychain (the macOS default store). **No-UI ONLY — this read must never
+    /// prompt.** `Claude Code-credentials` is Claude Code's own item. If our read popped the
+    /// auth dialog and the user clicked "Always Allow", macOS would re-scope that item's
+    /// Keychain PARTITION LIST onto Headroom and evict Claude Code, condemning *it* to a
+    /// login-keychain password prompt on every token read — the recurring bug. So when the
+    /// in-process no-UI read can't get the token (our team has been evicted from the partition
+    /// list, or the keychain is locked), we return nil and let the card fall back to its
+    /// last-good snapshot. We never spawn `/usr/bin/security -w`; that interactive fallback WAS
+    /// the prompt source, and a denied read is a silent, self-healing degradation instead — it
+    /// reappears fresh the moment our team is back in the partition list. (1.6.4) No-op off macOS.
     static func credsFromKeychain(service: String) -> Creds? {
         #if os(macOS)
-        switch KeychainRead.noUI(service: service) {
-        case .found(let s):
-            return creds(fromJSON: Data(s.utf8))
-        case .notFound:
-            return nil
-        case .needsInteraction, .error:
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-            p.arguments = ["find-generic-password", "-s", service, "-w"]
-            let out = Pipe(); p.standardOutput = out; p.standardError = FileHandle.nullDevice
-            do { try p.run() } catch { return nil }
-            DispatchQueue.global().asyncAfter(deadline: .now() + 10) {
-                if p.isRunning { p.terminate() }
-            }
-            let data = out.fileHandleForReading.readDataToEndOfFile()
-            p.waitUntilExit()
-            guard p.terminationStatus == 0 else { return nil }
-            return creds(fromJSON: data)
-        }
+        guard case .found(let s) = KeychainRead.noUI(service: service) else { return nil }
+        return creds(fromJSON: Data(s.utf8))
         #else
         return nil
         #endif

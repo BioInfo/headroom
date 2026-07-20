@@ -18,6 +18,14 @@ import Foundation
 ///
 /// Writes to our own `Headroom-*` stashes are safe and are verified by reading them back
 /// (gate on the artifact, not the exit code); the token value is never logged.
+///
+/// ## Reads of the live slot are NO-UI ONLY. We never prompt on it. (1.6.4)
+/// A prompt on `Claude Code-credentials` leads the user to click "Always Allow", and macOS
+/// then re-scopes that item's partition list onto Headroom — evicting Claude Code, which is
+/// the reverse of the 1.6.2 write bug and the reason the password prompts kept coming back.
+/// `readSlot` therefore refuses the `/usr/bin/security -w` interactive fallback for
+/// `liveService`: a denied live read returns nil and the card shows its last-good snapshot,
+/// self-healing once our team is back in the partition list. Our own stashes keep the fallback.
 public enum ClaudeAccounts {
     public static let liveService = "Claude Code-credentials"
     public static let stashPrefix = "Headroom-claude-acct-"
@@ -73,6 +81,14 @@ public enum ClaudeAccounts {
     public static func readLive() -> String? { readSlot(service: liveService) }
     public static func readStash(_ label: String) -> String? { readSlot(service: stashPrefix + label) }
 
+    /// Whether a Keychain read of `service` may fall back to the interactive
+    /// `/usr/bin/security -w` subprocess when the no-UI read is denied. FALSE for the live
+    /// item (`Claude Code-credentials`): a prompt there leads to "Always Allow", which
+    /// re-scopes the item's partition list onto Headroom and evicts Claude Code — the recurring
+    /// password-prompt bug. TRUE only for our own `Headroom-*` stashes, which we create with
+    /// `-T /usr/bin/security` so the fallback reads them without a dialog. (1.6.4)
+    static func usesInteractiveFallback(service: String) -> Bool { service != liveService }
+
     private static func readSlot(service: String) -> String? {
         // In-process no-UI read first: no subprocess, and it can never pop the macOS auth
         // dialog or hang a background path (verified live: reads of both the live slot and
@@ -81,9 +97,16 @@ public enum ClaudeAccounts {
         case .found(let s): return s
         case .notFound:     return nil
         case .needsInteraction, .error:
-            // Edge case (locked keychain / stricter ACL): fall back to /usr/bin/security,
-            // which existing user grants often cover — timeout-guarded so a would-prompt
-            // read degrades to nil instead of hanging.
+            // NEVER prompt on the live item. `Claude Code-credentials` is Claude Code's own
+            // Keychain item; a prompt here leads the user to click "Always Allow", which
+            // re-scopes that item's partition list onto Headroom and evicts Claude Code — the
+            // recurring password-prompt bug. A denied live read degrades to nil (the card
+            // shows its last-good snapshot) and self-heals once our team is back in the
+            // partition list. Our OWN stashes are created with `-T /usr/bin/security`, so the
+            // interactive fallback reads them without a dialog — keep it only for those. (1.6.4)
+            guard usesInteractiveFallback(service: service) else { return nil }
+            // Edge case (locked keychain / stricter ACL) for a stash: fall back to
+            // /usr/bin/security — timeout-guarded so a would-prompt read degrades to nil.
             guard let out = security(["find-generic-password", "-s", service, "-w"], timeout: 10).out else { return nil }
             // `security -w` appends a newline; strip it so a readback compares equal to what we wrote.
             let v = out.trimmingCharacters(in: .newlines)

@@ -29,3 +29,14 @@ import Testing
     #expect(ClaudeAccounts.sanitizeLabel("###") == nil)                       // nothing usable
     #expect(ClaudeAccounts.sanitizeLabel("") == nil)
 }
+
+// 1.6.4 invariant: a read of the LIVE item must never fall back to the interactive
+// `/usr/bin/security -w` subprocess. That fallback was the recurring password prompt — it
+// leads the user to click "Always Allow", which re-scopes the item's partition list onto
+// Headroom and evicts Claude Code. Only our own stashes may use the interactive fallback.
+@Test func liveSlotNeverUsesInteractiveFallback() {
+    #expect(ClaudeAccounts.usesInteractiveFallback(service: ClaudeAccounts.liveService) == false)
+    #expect(ClaudeAccounts.usesInteractiveFallback(service: "Claude Code-credentials") == false)
+    #expect(ClaudeAccounts.usesInteractiveFallback(service: ClaudeAccounts.stashPrefix + "personal"))
+    #expect(ClaudeAccounts.usesInteractiveFallback(service: ClaudeAccounts.stashPrefix + "work"))
+}

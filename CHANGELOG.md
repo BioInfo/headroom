@@ -5,6 +5,15 @@ All notable changes to Headroom are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.4] - 2026-07-20
+
+### Fixed
+- **The login-keychain password prompt kept coming back.** The Claude meter reads Claude Code's own credential from the macOS Keychain. Two apps sharing one Keychain item is fragile: macOS rewrites that item's access permission (its *partition list*) to whichever program last touched it, so Headroom's silent access would get revoked. When that happened, Headroom fell back to a command that pops the "enter your login keychain password" dialog — and approving it ("Always Allow") flipped the permission the other way and locked **Claude Code** out of its own token, so then Claude Code prompted. That back-and-forth is why the prompt returned no matter how many times you fixed it.
+
+  Headroom now **never shows that dialog for Claude Code's credential.** If it cannot read the token silently, the Claude card simply keeps showing its last reading until access comes back on its own — no prompt, so nothing gets locked out and the loop ends. Saved-account cards are unaffected (Headroom owns those items). Reading a saved account can still ask once, as before.
+
+  If you are already stuck in the loop, run the partition-list command from the 1.6.2 notes one last time; after upgrading to 1.6.4 it will hold.
+
 ## [1.6.3] - 2026-07-17
 
 ### Fixed
