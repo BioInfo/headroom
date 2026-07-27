@@ -66,9 +66,48 @@ public enum ClaudePartition {
     /// prompt; a stale card (last-good) is the correct trade when membership can't be confirmed.
     public static func admitsSelf(service: String) -> Bool {
         guard let parts = partitions(service: service) else { return false }   // can't confirm -> skip
-        if parts.isEmpty { return true }                                       // unrestricted item
-        let mine = ownIdentifiers()
-        return parts.contains { $0 == "apple:" || mine.contains($0) }
+        return admits(partitions: parts, identifiers: ownIdentifiers())
+    }
+
+    /// Pure, testable core of `admitsSelf`: does `partitions` admit a caller whose partition
+    /// identifiers are `identifiers`? An empty list means the item is unrestricted.
+    public static func admits(partitions: [String], identifiers: [String]) -> Bool {
+        if partitions.isEmpty { return true }
+        return partitions.contains { $0 == "apple:" || identifiers.contains($0) }
+    }
+
+    /// The partition entry that covers Apple's own command-line keychain tools, i.e.
+    /// `/usr/bin/security`. See `admitsSecurityTool(service:)`.
+    public static let securityToolPartition = "apple-tool:"
+
+    /// Whether `service`'s partition list admits **`/usr/bin/security`** — i.e. whether reading
+    /// the secret by spawning that tool is guaranteed not to prompt.
+    ///
+    /// ## Why this is the durable read path for the live item (1.6.6)
+    /// `admitsSelf` is true only while Headroom's team happens to be pinned into
+    /// `Claude Code-credentials`' partition list, and that pin does not survive: Claude Code
+    /// refreshes its token every few hours, each refresh WRITES the item, and a write re-scopes
+    /// the partition list onto the writer. Claude Code writes via `/usr/bin/security`, so every
+    /// refresh resets the list to exactly `["apple-tool:"]` and evicts our team again. Re-pinning
+    /// is therefore a treadmill — measured on a real install: the list was `["apple-tool:"]` only,
+    /// hours after a Claude Code refresh, with three teams previously pinned and all three gone.
+    ///
+    /// `apple-tool:` is the one entry that is *always* there, because Claude Code's own writes
+    /// keep re-establishing it — it cannot be evicted without breaking Claude Code itself. So a
+    /// read performed BY `/usr/bin/security` is admitted permanently, needs no pin, and never
+    /// triggers the XARA prompt. Verified live: 4 consecutive reads, 0 `SecurityAgent` processes
+    /// spawned, partition list byte-identical afterwards (no churn).
+    ///
+    /// Still **fails CLOSED** — if the list can't be read, or `apple-tool:` is absent, return
+    /// false and let the caller show last-good rather than risk a dialog.
+    public static func admitsSecurityTool(service: String) -> Bool {
+        guard let parts = partitions(service: service) else { return false }   // can't confirm -> skip
+        return admitsSecurityTool(partitions: parts)
+    }
+
+    /// Pure, testable core of `admitsSecurityTool(service:)`.
+    public static func admitsSecurityTool(partitions: [String]) -> Bool {
+        admits(partitions: partitions, identifiers: [securityToolPartition])
     }
 
     /// Pure, testable: decode the hex-encoded partition-ACL description into the Partitions

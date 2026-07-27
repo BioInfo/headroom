@@ -130,24 +130,40 @@ public struct ClaudeCollector: Collector {
         return creds(fromJSON: bytes)
     }
 
-    /// macOS login Keychain (the macOS default store). **No-UI ONLY — this read must never
-    /// prompt.** `Claude Code-credentials` is Claude Code's own item. If our read popped the
-    /// auth dialog and the user clicked "Always Allow", macOS would re-scope that item's
-    /// Keychain PARTITION LIST onto Headroom and evict Claude Code, condemning *it* to a
-    /// login-keychain password prompt on every token read — the recurring bug. So when the
-    /// in-process no-UI read can't get the token (our team has been evicted from the partition
-    /// list, or the keychain is locked), we return nil and let the card fall back to its
-    /// last-good snapshot. We never spawn `/usr/bin/security -w`; that interactive fallback WAS
-    /// the prompt source, and a denied read is a silent, self-healing degradation instead — it
-    /// reappears fresh the moment our team is back in the partition list. (1.6.4) No-op off macOS.
+    /// macOS login Keychain (the macOS default store). **This read must never prompt**, and it
+    /// can't: every path below is gated on partition-list metadata read beforehand, which itself
+    /// never prompts. `Claude Code-credentials` is Claude Code's own item; if our read popped the
+    /// auth dialog and the user clicked "Always Allow", macOS would re-scope that item's PARTITION
+    /// LIST onto Headroom and evict Claude Code, condemning *it* to a password prompt on every
+    /// token read — the recurring bug.
+    ///
+    /// Two admitted ways in, tried in order:
+    /// 1. our team is pinned in the partition list -> in-process no-UI read (no subprocess);
+    /// 2. otherwise `apple-tool:` is in the list -> read via `/usr/bin/security`, which that entry
+    ///    admits permanently and which Claude Code's own writes keep re-establishing.
+    ///
+    /// (2) is the steady state and the reason this card stays fresh: 1.6.4/1.6.5 had only (1), so
+    /// the first Claude Code token refresh after a re-pin evicted us and froze the card on its
+    /// last-good snapshot indefinitely. Neither path can show a dialog; if neither is admitted we
+    /// return nil and the card shows last-good, self-healing on the next tick. (1.6.6)
+    /// No-op off macOS.
     static func credsFromKeychain(service: String) -> Creds? {
         #if os(macOS)
         // Gate on partition membership FIRST (ACL metadata, never prompts). If our team isn't
         // in the item's partition list we are evicted, and even a no-UI SecItemCopyMatching on
         // the SECRET triggers the un-suppressible XARA prompt — so we must not attempt it. Skip
         // to nil (card shows last-good) and self-heal once our team is back in the list. (1.6.5)
-        guard ClaudePartition.admitsSelf(service: service) else { return nil }
-        guard case .found(let s) = KeychainRead.noUI(service: service) else { return nil }
+        // When our team IS pinned, the in-process no-UI read is the fast path (no subprocess).
+        if ClaudePartition.admitsSelf(service: service),
+           case .found(let s) = KeychainRead.noUI(service: service) {
+            return creds(fromJSON: Data(s.utf8))
+        }
+        // Otherwise we're evicted — the steady state, because every Claude Code token refresh
+        // resets this item's partition list to `["apple-tool:"]`. Read via `/usr/bin/security`,
+        // which that entry admits permanently and which therefore cannot prompt. Gated on the
+        // same ACL metadata, so a card that can't be read silently stays on last-good. (1.6.6)
+        guard ClaudePartition.admitsSecurityTool(service: service) else { return nil }
+        guard let s = KeychainRead.viaSecurityTool(service: service) else { return nil }
         return creds(fromJSON: Data(s.utf8))
         #else
         return nil

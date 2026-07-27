@@ -100,7 +100,7 @@ enum WindowShooter {
 }
 
 struct HeadroomApp: App {
-    @State private var model = AppModel()
+    @State private var model = AppModel.shared
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
     var body: some Scene {
@@ -307,6 +307,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         NSApp.setActivationPolicy(.accessory)
+        // Start polling NOW, not when the user first opens the menu. A MenuBarExtra's content
+        // (which carries the `.task { model.start() }`) isn't rendered until the icon is
+        // clicked, so until this call the app could sit indefinitely after launch showing a
+        // stale glyph and never refreshing. `start()` is idempotent, so the popover's own
+        // `.task` stays as a harmless second trigger.
+        AppModel.shared.start()
         if !Prefs.shared.hasOnboarded { showOnboarding() }
     }
 

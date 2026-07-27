@@ -5,6 +5,17 @@ All notable changes to Headroom are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.6] - 2026-07-27
+
+### Fixed
+- **The Claude card stopped updating.** 1.6.5 ended the password prompts by refusing to read Claude's credentials whenever Headroom wasn't in that keychain item's access list. It had no other way in, so on many machines the card simply froze on a reading that could be days old.
+
+  Claude Code refreshes its token every few hours, and each refresh rewrites that access list down to a single entry: the one covering Apple's own `security` command-line tool, which is how Claude Code stores the token. Any app pinned into the list gets dropped on the next refresh, so pinning Headroom was never going to hold, however many times you re-ran it.
+
+  Headroom now reads through that surviving entry, which works because Claude Code's own writes keep re-establishing it. It checks the access-list metadata first, which never prompts, and reads only once that confirms it is allowed. The card stays live across every token refresh, with no pinning and no setup, and Headroom still cannot produce a password dialog under any condition. It reads Claude Code's credentials and never writes them.
+
+- **Headroom didn't poll until you opened it.** The refresh loop was started by the menu's own content, and macOS doesn't render that content until you click the icon. After a launch, a login, or an auto-update, the app could sit for hours showing an old reading and never refresh. Polling now starts at launch, about a second after the app opens, with the menu untouched.
+
 ## [1.6.5] - 2026-07-20
 
 ### Fixed

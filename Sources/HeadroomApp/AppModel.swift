@@ -7,6 +7,16 @@ import HeadroomKit
 @MainActor
 @Observable
 final class AppModel {
+
+    /// The one live model backing the menu-bar scene.
+    ///
+    /// It is a shared instance so `AppDelegate.applicationDidFinishLaunching` can `start()` the
+    /// refresh loop at launch. It previously started only from the popover's `.task`, and a
+    /// `MenuBarExtra`'s CONTENT is not rendered until the user clicks the icon — so an app that
+    /// had just launched (or been relaunched after an update) never polled at all until someone
+    /// opened it, and the menu-bar glyph sat on a last-good reading that could be days old.
+    /// Snapshot/mock renderers still build their own throwaway instances.
+    static let shared = AppModel()
     var usages: [ProviderUsage] = []
     var isRefreshing = false
     var lastRefresh: Date?

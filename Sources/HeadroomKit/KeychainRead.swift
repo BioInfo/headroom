@@ -54,4 +54,40 @@ public enum KeychainRead {
         return .notFound
         #endif
     }
+
+    /// Read a generic-password item by spawning **`/usr/bin/security`**, whose keychain access is
+    /// covered by the `apple-tool:` partition entry.
+    ///
+    /// ⚠️ **Only call this once `ClaudePartition.admitsSecurityTool(service:)` is true.** That
+    /// predicate is what makes this read provably promptless; this function has no way to suppress
+    /// a dialog on its own (no flag can — see `ClaudePartition`). The `timeout` is a backstop, not
+    /// the guarantee: if the tool ever did block on a prompt we terminate it and return nil so a
+    /// background refresh degrades to last-good instead of hanging.
+    ///
+    /// Passing the secret back over a pipe keeps it off argv (unlike a write), and the value is
+    /// never logged.
+    public static func viaSecurityTool(service: String, timeout: TimeInterval = 10) -> String? {
+        #if os(macOS)
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        p.arguments = ["find-generic-password", "-s", service, "-w"]
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = FileHandle.nullDevice
+        do { try p.run() } catch { return nil }
+        let timedOut = DispatchWorkItem { if p.isRunning { p.terminate() } }
+        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: timedOut)
+        // Drain before waiting: a full pipe would deadlock a child that outgrew the 64KB buffer.
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        timedOut.cancel()
+        guard p.terminationStatus == 0,
+              let s = String(data: data, encoding: .utf8) else { return nil }
+        // `security -w` appends a newline.
+        let v = s.trimmingCharacters(in: .newlines)
+        return v.isEmpty ? nil : v
+        #else
+        return nil
+        #endif
+    }
 }
