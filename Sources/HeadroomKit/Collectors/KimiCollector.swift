@@ -1,30 +1,40 @@
 import Foundation
 
-/// Kimi (Moonshot) coding-plan headroom collector — paste-a-token, browser-free.
+/// Kimi (Moonshot) coding-plan headroom collector — API key, no browser, no expiry.
 ///
-/// Kimi signs in with Google, and Google refuses OAuth inside an embedded webview (its
-/// "disallowed_useragent" block, and the user-agent trick no longer defeats it — verified
-/// 2026-06-14). So Headroom doesn't try: the usage RPC accepts the session JWT as a plain
-/// `Authorization: Bearer` with no cookie (verified `credentials: "omit"` → 200), exactly
-/// like the MiniMax/GLM key path. The user grabs the token once and pastes it:
+/// HISTORY, because the previous design failed in a way worth not repeating (2026-08-27):
+/// this used to read the web app's session JWT out of `localStorage.access_token`, pasted by
+/// hand. That token is a ~30-DAY credential. It expired on 2026-08-14 and the meter simply
+/// stopped, because a paste-once secret with a fixed lifetime is a scheduled outage.
 ///
-///   at kimi.com (logged in) → DevTools console → copy(localStorage.access_token)
+/// The coding plan's own API key reads the same numbers and does not expire:
 ///
-///   POST www.kimi.com/apiv2/kimi.gateway.billing.v1.BillingService/GetUsages
-///        body {"scope":["FEATURE_CODING"]}   header authorization: Bearer <token>
+///   GET https://api.kimi.com/coding/v1/usages     header  Authorization: Bearer sk-...
 ///
-/// The token is a ~30-day JWT, so a 401 maps to `.needsLogin` ("paste a fresh one"). Plan
-/// name comes from MembershipService/GetSubscription → subscription.goods.title.
+/// The response confirms the path in-band — `authentication.method == "METHOD_API_KEY"`,
+/// `scope == "FEATURE_CODING"` — so the collector is not inferring which road it drove on.
+/// `limits[]` holds the rolling 5h sub-window; the top-level `usage` is the plan-period cap.
+/// Both are counts out of `limit:"100"`, i.e. already percentages.
+///
+/// Plan label comes from `/coding/v1/me` → `user_level_name` ("Allegretto"), replacing the
+/// MembershipService RPC that only the web session could call.
+///
+/// The key is the same one that drives `cki` / the gateway's `kimi-latest` route: get it from
+/// kimi.com → Code → API keys. A 401 still maps to `.needsLogin` (revoked or wrong key), but
+/// it no longer arrives on a timer.
 public struct KimiCollector: Collector {
     public let id = "kimi"
     public let displayName = "Kimi"
     public let cadence: RefreshCadence = .relaxed   // remote API call
 
-    /// Keychain service for the pasted session token (Headroom-owned).
-    public static let keyService = "Headroom-kimi-token"
+    /// Keychain service for the pasted API key (Headroom-owned).
+    /// Renamed from `Headroom-kimi-token` when the session-JWT path was retired — the old
+    /// item held a different KIND of secret, so reusing the name would have let a stale JWT
+    /// masquerade as a key.
+    public static let keyService = "Headroom-kimi-key"
 
-    private let usagesURL = URL(string: "https://www.kimi.com/apiv2/kimi.gateway.billing.v1.BillingService/GetUsages")!
-    private let subscriptionURL = URL(string: "https://www.kimi.com/apiv2/kimi.gateway.membership.v2.MembershipService/GetSubscription")!
+    private let usagesURL = URL(string: "https://api.kimi.com/coding/v1/usages")!
+    private let meURL = URL(string: "https://api.kimi.com/coding/v1/me")!
     private let session: URLSession
     private let tokenOverride: String?
 
@@ -37,66 +47,61 @@ public struct KimiCollector: Collector {
         if let tokenOverride { return tokenOverride }
         return LocalKey.resolve(
             storedService: Self.keyService,
-            envNames: ["KIMI_TOKEN", "KIMI_ACCESS_TOKEN"],
+            envNames: ["KIMI_API_KEY", "MOONSHOT_API_KEY", "KIMI_TOKEN"],
             filePaths: [])
     }
 
-    private func request(_ url: URL, body: String, token: String) -> URLRequest {
+    private func request(_ url: URL, key: String) -> URLRequest {
         var req = URLRequest(url: url)
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.setValue("1", forHTTPHeaderField: "connect-protocol-version")
-        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        req.httpBody = Data(body.utf8)
+        req.httpMethod = "GET"
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         return req
     }
 
     public func collect() async throws -> ProviderUsage {
-        guard let token = resolveToken(), !token.isEmpty else { return needsLogin(plan: "Coding") }
+        guard let key = resolveToken(), !key.isEmpty else { return needsLogin(plan: "Coding") }
 
-        let (data, response) = try await session.data(
-            for: request(usagesURL, body: #"{"scope":["FEATURE_CODING"]}"#, token: token))
+        let (data, response) = try await session.data(for: request(usagesURL, key: key))
         let code = (response as? HTTPURLResponse)?.statusCode ?? 0
-        if code == 401 { return needsLogin(plan: "Coding") }   // expired/invalid token → re-paste
+        if code == 401 || code == 403 { return needsLogin(plan: "Coding") }   // revoked / wrong key
         guard code == 200 else {
             return ProviderUsage(provider: id, displayName: displayName, status: .error)
         }
-        let plan = (try? await fetchPlan(token)) ?? nil
+        let plan = (try? await fetchPlan(key)) ?? nil
         return Self.parse(data, id: id, displayName: displayName, plan: plan)
     }
 
     /// Plan label (best-effort; nil on any failure — the usage still renders without it).
-    private func fetchPlan(_ token: String) async throws -> String? {
-        let (data, response) = try await session.data(
-            for: request(subscriptionURL, body: "{}", token: token))
+    private func fetchPlan(_ key: String) async throws -> String? {
+        let (data, response) = try await session.data(for: request(meURL, key: key))
         guard (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
-        return (try? JSONDecoder().decode(SubscriptionResponse.self, from: data))?
-            .subscription?.goods?.title
+        return (try? JSONDecoder().decode(MeResponse.self, from: data))?.userLevelName
     }
 
     // MARK: - parsing (split out so tests can hit it with the captured response)
 
     static func parse(_ data: Data, id: String, displayName: String, plan: String?) -> ProviderUsage {
-        guard let resp = try? JSONDecoder().decode(UsagesResponse.self, from: data),
-              let feat = resp.usages?.first(where: { $0.scope == "FEATURE_CODING" }) ?? resp.usages?.first else {
+        guard let resp = try? JSONDecoder().decode(UsagesResponse.self, from: data) else {
+            return ProviderUsage(provider: id, displayName: displayName, status: .error)
+        }
+        let metrics = resp.metrics
+        // No readable meter is an ERROR, never an empty-but-ok card. An absent reading is
+        // not a good reading.
+        guard !metrics.isEmpty else {
             return ProviderUsage(provider: id, displayName: displayName, status: .error)
         }
         return ProviderUsage(provider: id, displayName: displayName, plan: plan,
-                             metrics: feat.metrics, status: .ok)
+                             metrics: metrics, status: .ok)
     }
 
     // MARK: - response shapes
 
-    /// GetUsages: values are out of `limit:"100"`, i.e. already percentages. `limits[]`
-    /// holds rolling sub-windows (the 5h, `window.duration` 300 min); `detail` at the
-    /// feature level is the plan-period cap.
+    /// `GET /coding/v1/usages`. Flat, unlike the old billing RPC's `usages[]` envelope.
     struct UsagesResponse: Decodable {
-        let usages: [FeatureUsage]?
-    }
-    struct FeatureUsage: Decodable {
-        let scope: String?
-        let detail: Detail?
-        let limits: [Limit]?
+        let usage: Detail?          // plan-period cap
+        let limits: [Limit]?        // rolling sub-windows (the 5h)
+        let authentication: Authentication?
 
         var metrics: [Metric] {
             var out: [Metric] = []
@@ -108,13 +113,14 @@ public struct KimiCollector: Collector {
                 out.append(Metric(label: label, percentUsed: pct, unit: .percent,
                                   resetAt: ClaudeCollector.parseISO(d.resetTime), windowDuration: dur))
             }
-            if let d = detail, let pct = d.usedPercent {
+            if let d = usage, let pct = d.usedPercent {
                 out.append(Metric(label: "Plan window", percentUsed: pct, unit: .percent,
                                   resetAt: ClaudeCollector.parseISO(d.resetTime)))
             }
             return out
         }
     }
+    struct Authentication: Decodable { let method: String?; let scope: String? }
     struct Limit: Decodable { let window: Window?; let detail: Detail? }
     struct Window: Decodable {
         let duration: Double?
@@ -131,15 +137,25 @@ public struct KimiCollector: Collector {
         }
     }
     struct Detail: Decodable {
+        let limit: String?
         let used: String?
+        let remaining: String?
         let resetTime: String?
-        /// `used` is a string count out of 100, so it is the percent directly.
-        var usedPercent: Double? { used.flatMap(Double.init) }
+        /// `used` is a string count out of 100, so it is the percent directly. At zero usage
+        /// the server omits `used` and sends only `remaining` (seen 2026-09-24), so derive it
+        /// from `limit - remaining` rather than dropping the window.
+        var usedPercent: Double? {
+            if let u = used.flatMap(Double.init) { return u }
+            guard let r = remaining.flatMap(Double.init) else { return nil }
+            let l = limit.flatMap(Double.init) ?? 100
+            guard l > 0 else { return nil }
+            return (l - r) / l * 100
+        }
     }
 
-    struct SubscriptionResponse: Decodable {
-        let subscription: Subscription?
-        struct Subscription: Decodable { let goods: Goods? }
-        struct Goods: Decodable { let title: String? }
+    /// `GET /coding/v1/me` — only the plan label is used.
+    struct MeResponse: Decodable {
+        let userLevelName: String?
+        enum CodingKeys: String, CodingKey { case userLevelName = "user_level_name" }
     }
 }

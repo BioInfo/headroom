@@ -55,10 +55,53 @@ private let grokBillingJSON = #"""
 }
 
 @Test func grokEmptyOrMissingCreditsYieldsNoMeter() throws {
-    // A response with no creditUsagePercent produces no meter (rather than a 0% phantom).
+    // A response with neither creditUsagePercent nor monthlyLimit/used produces no meter.
     let json = #"{"config":{"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY"}}}"#
     let resp = try JSONDecoder().decode(GrokCollector.Response.self, from: Data(json.utf8))
     #expect(resp.config?.metrics.isEmpty == true)
+}
+
+// Real response captured 2026-08-09 from GET https://cli-chat-proxy.grok.com/v1/billing
+// (no format param, CLI 1.0.0). The weekly creditUsagePercent field is gone; the default
+// endpoint returns monthlyLimit + used as {"val": N} credit wrappers.
+private let grokMonthlyBillingJSON = #"""
+{"config":{"monthlyLimit":{"val":4000},"used":{"val":0},"onDemandCap":{"val":0},"billingPeriodStart":"2026-08-01T00:00:00+00:00","billingPeriodEnd":"2026-09-01T00:00:00+00:00"}}
+"""#
+
+@Test func grokDecodesMonthlyCreditMeter() throws {
+    let resp = try JSONDecoder().decode(GrokCollector.Response.self,
+                                        from: Data(grokMonthlyBillingJSON.utf8))
+    let m = resp.config?.metrics ?? []
+    #expect(m.count == 1)
+    let monthly = m.first
+    #expect(monthly?.label == "Monthly")
+    #expect(monthly?.percentUsed == 0)               // 0 / 4000 * 100 = 0%
+    #expect(monthly?.fractionUsed == 0.0)            // fresh window → empty bar
+    #expect(monthly?.used == 0)
+    #expect(monthly?.limit == 4000)
+    #expect(monthly?.unit == .percent)
+    #expect(monthly?.resetAt != nil)                 // billingPeriodEnd parses
+    // Monthly window ~31 days (Aug).
+    let dur = monthly?.windowDuration ?? 0
+    #expect(dur > 2_500_000 && dur < 2_700_000)      // ≈2_678_400 (31d)
+}
+
+@Test func grokMonthlyMeterComputesPercentage() throws {
+    // 1200 of 4000 credits used = 30%.
+    let json = #"{"config":{"monthlyLimit":{"val":4000},"used":{"val":1200},"billingPeriodStart":"2026-08-01T00:00:00+00:00","billingPeriodEnd":"2026-09-01T00:00:00+00:00"}}"#
+    let resp = try JSONDecoder().decode(GrokCollector.Response.self, from: Data(json.utf8))
+    let m = resp.config?.metrics.first
+    #expect(m?.percentUsed == 30)
+    #expect(m?.fractionUsed == 0.3)
+}
+
+@Test func grokMonthlyMeterAtLimit() throws {
+    // Fully used: 4000/4000 = 100%.
+    let json = #"{"config":{"monthlyLimit":{"val":4000},"used":{"val":4000},"billingPeriodStart":"2026-08-01T00:00:00+00:00","billingPeriodEnd":"2026-09-01T00:00:00+00:00"}}"#
+    let resp = try JSONDecoder().decode(GrokCollector.Response.self, from: Data(json.utf8))
+    let m = resp.config?.metrics.first
+    #expect(m?.percentUsed == 100)
+    #expect(m?.fractionUsed == 1.0)
 }
 
 @Test func grokParsesPlainISOFallback() {

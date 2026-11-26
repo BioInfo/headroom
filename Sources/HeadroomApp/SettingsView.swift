@@ -115,8 +115,12 @@ private struct ProvidersTab: View {
             VStack(alignment: .leading, spacing: 10) {
                 Text("Track only what you pay for. Web/key providers light up once a key is pasted or you log in once.")
                     .font(.caption).foregroundStyle(skin.faint)
-                ForEach(model.allProviderIDsForDisplay, id: \.self) { id in
-                    ProviderRow(model: model, skin: skin, id: id, openLogin: openLogin)
+                Text("Use the arrows to set the order cards appear in the popover and menu bar.")
+                    .font(.caption).foregroundStyle(skin.faint)
+                let ids = model.allProviderIDsForDisplay
+                ForEach(ids, id: \.self) { id in
+                    ProviderRow(model: model, skin: skin, id: id, openLogin: openLogin,
+                                isFirst: id == ids.first, isLast: id == ids.last)
                 }
                 ClaudeAccountsSection(model: model, skin: skin)
                 HStack(spacing: 5) {
@@ -136,6 +140,8 @@ private struct ProviderRow: View {
     let skin: Skin
     let id: String
     var openLogin: (String) -> Void
+    var isFirst = false
+    var isLast = false
     @State private var keyText = ""
 
     private var enabled: Binding<Bool> {
@@ -152,6 +158,12 @@ private struct ProviderRow: View {
                 .toggleStyle(.switch).tint(skin.ramp(.healthy))
                 Spacer()
                 Text(kindLabel(kind)).font(.caption2).foregroundStyle(skin.faint)
+                Button { model.moveProvider(id, by: -1) } label: { Image(systemName: "chevron.up") }
+                    .buttonStyle(.borderless).disabled(isFirst).help("Move up")
+                    .accessibilityLabel("Move \(Prefs.displayName(id)) up")
+                Button { model.moveProvider(id, by: 1) } label: { Image(systemName: "chevron.down") }
+                    .buttonStyle(.borderless).disabled(isLast).help("Move down")
+                    .accessibilityLabel("Move \(Prefs.displayName(id)) down")
             }
 
             switch kind {

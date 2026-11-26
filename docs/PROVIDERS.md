@@ -124,6 +124,13 @@ DevTools spike on a logged-in AI Studio session (2026-06-14) confirmed there is 
 - **License/clean-room note:** endpoint + header + field names discovered by probing a real local token + `strings` on the CLI binary; no code copied. (A competing OSS tracker, CodexBar, reads Grok via a heavier gRPC-web + browser-cookie path; our plain-JSON GET is independent and simpler.) Token never stored, logged, or committed.
 - **Status:** BUILT + wired into the CLI host and app, default-enabled. Browser-free.
 
+## OpenCode Go — `opencode`  ✅ BUILT 2026-11-26 (browser-free, API key)
+
+- **Endpoint:** `GET https://opencode.ai/zen/go/v1/usage`, `Authorization: Bearer <OpenCode API key>`. Undocumented; the public feature request is anomalyco/opencode#31084.
+- **Response:** `{"usage":{"rolling":{…},"weekly":{…},"monthly":{…}}}`, each window `{"status":"ok","percent":9,"resetsAt":"…Z"}`. `percent` is already 0-100 of the plan's dollar allowance; `rolling` is the 5-hour window.
+- **Dead ends:** `/zen/v1/usage` and `/zen/go/v1/balance` return 404.
+- **Plan label:** not in the response; the card shows `Go` (Go and Go Plus read the same).
+
 ## Service status pages (live health, not usage)  ✅ CAPTURED 2026-06-14
 
 Separate from usage: the public Atlassian Statuspage feeds power the Down/Degraded card pill

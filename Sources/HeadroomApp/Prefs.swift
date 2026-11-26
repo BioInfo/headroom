@@ -91,15 +91,18 @@ final class Prefs {
     /// The BASE providers Headroom knows about, in display order. Extra Claude accounts are
     /// dynamic (`claude-acct-<label>`, discovered from stashes) and appended by callers via
     /// `AppModel.discoveredClaudeIDs` — they are not part of this fixed set.
-    static let allProviderIDs = ["claude", "codex", "minimax", "zai", "kimi", "grok"]
+    static let allProviderIDs = ["claude", "codex", "minimax", "zai", "kimi", "grok", "opencode"]
     /// On by default: every base provider. Local-creds ones (Claude/Codex) work with zero
     /// setup; key/token ones (MiniMax/GLM/Kimi) show a one-line "add a key" prompt until
     /// pasted — the discoverable funnel, consistent across all paste providers.
-    static let defaultEnabled: Set<String> = ["claude", "codex", "minimax", "zai", "kimi", "grok"]
+    static let defaultEnabled: Set<String> = ["claude", "codex", "minimax", "zai", "kimi", "grok", "opencode"]
 
     @ObservationIgnored private let d = UserDefaults.standard
 
     var enabledProviders: Set<String> { didSet { d.set(Array(enabledProviders), forKey: "enabledProviders") } }
+    /// User-chosen display order (Settings → Providers arrows). Empty = default order. Applied
+    /// via `ProviderOrder.apply`, so providers missing from it keep their default slot.
+    var providerOrder: [String]       { didSet { d.set(providerOrder, forKey: "providerOrder") } }
     var refreshMinutes: Int           { didSet { d.set(refreshMinutes, forKey: "refreshMinutes") } }
     /// Adaptive polling: pick the base interval from interaction recency + power/thermal
     /// state (see `AdaptiveCadence`) instead of the fixed slider. Opt-in — default off, so no
@@ -164,6 +167,7 @@ final class Prefs {
     private init() {
         let saved = d.array(forKey: "enabledProviders") as? [String]
         enabledProviders = saved.map(Set.init) ?? Self.defaultEnabled
+        providerOrder = (d.array(forKey: "providerOrder") as? [String]) ?? []
         refreshMinutes = (d.object(forKey: "refreshMinutes") as? Int) ?? 15
         adaptiveRefresh = d.bool(forKey: "adaptiveRefresh")   // default false (opt-in)
         notify = d.bool(forKey: "notify")                          // default false (quiet)
@@ -201,6 +205,13 @@ final class Prefs {
             d.set(Array(enabledProviders), forKey: "enabledProviders")
             d.set(true, forKey: "migratedClaudeAccounts")
         }
+        // One-time: a provider added after the user's enabled set was saved starts on, like
+        // every base provider does on a fresh install. Runs once, so a later disable sticks.
+        if !d.bool(forKey: "migratedOpenCode") {
+            enabledProviders.insert("opencode")
+            d.set(Array(enabledProviders), forKey: "enabledProviders")
+            d.set(true, forKey: "migratedOpenCode")
+        }
     }
 
     /// The scheme a view should skin with: the pinned appearance, or the passed system
@@ -227,6 +238,7 @@ final class Prefs {
         case "zai":     return "GLM (z.ai)"
         case "kimi":    return "Kimi"
         case "grok":    return "Grok"
+        case "opencode": return "OpenCode Go"
         default:        return id.capitalized
         }
     }
@@ -249,16 +261,15 @@ final class Prefs {
         switch id {
         case "codex", "grok":   return .local  // read local creds/logs, zero setup
         case "minimax":         return .key          // paste-once API key
-        case "kimi":            return .key          // paste-once session token (no API key exists)
+        case "kimi":            return .key          // paste-once coding-plan API key
+        case "opencode":        return .key          // paste-once OpenCode API key
         case "zai":             return .web          // pasted key (primary) OR browser login (fallback)
         default:                return .key
         }
     }
 
     /// What the paste field accepts, for the placeholder.
-    static func pastePlaceholder(_ id: String) -> String {
-        id == "kimi" ? "Paste session token" : "Paste API key"
-    }
+    static func pastePlaceholder(_ id: String) -> String { "Paste API key" }
 
     /// Provider-specific setup instructions under the paste field. Clear steps = the app
     /// works for as many people as possible, without fighting a (Google-blocked) login.
@@ -269,7 +280,9 @@ final class Prefs {
         case "zai":
             return "Paste your GLM coding-plan key. No browser login needed. (Browser login is a fallback.)"
         case "kimi":
-            return "At kimi.com (signed in), open the browser DevTools console, run  copy(localStorage.access_token)  and paste here. Works without Google login; lasts ~30 days."
+            return "Paste your Kimi coding-plan key (sk-…), from kimi.com → Code → API keys. No browser login needed, and it does not expire. (Earlier builds asked for a DevTools session token; that one died every 30 days.)"
+        case "opencode":
+            return "Paste your OpenCode API key, from opencode.ai → workspace → API keys. Reads the Go plan's 5-hour, weekly and monthly limits."
         default:
             return nil
         }

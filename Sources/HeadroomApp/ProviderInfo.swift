@@ -20,6 +20,7 @@ enum ProviderInfo {
         case "zai":     s = "https://z.ai/manage-apikey/coding-plan/personal/usage"
         case "kimi":    s = "https://www.kimi.com/code/console"
         case "grok":    s = "https://grok.com"
+        case "opencode": s = "https://opencode.ai/auth"
         default:        s = nil
         }
         return s.flatMap(URL.init(string:))
@@ -39,6 +40,7 @@ enum ProviderInfo {
         case "zai":     return "G"   // GLM
         case "kimi":    return "K"
         case "grok":    return "R"   // gRok (G is taken by GLM, X by Codex)
+        case "opencode": return "O"
         default:        return String(id.prefix(1)).uppercased()
         }
     }
@@ -54,6 +56,7 @@ enum ProviderInfo {
         case "zai":     return skin.ramp(.runaway)    // aubergine
         case "kimi":    return skin.ramp(.warming)    // clay-amber
         case "grok":    return skin.clay              // graphite-taupe (xAI reads dark; clay is our neutral)
+        case "opencode": return skin.ink2
         default:        return skin.clay
         }
     }

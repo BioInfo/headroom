@@ -5,6 +5,24 @@ All notable changes to Headroom are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.8] - 2026-11-26
+
+### Added
+- **OpenCode Go card.** Paste your OpenCode API key in Settings → Providers and Headroom shows the Go plan's 5-hour, weekly and monthly limits with their reset times.
+- **Put providers in any order.** Arrows on each row in Settings → Providers move it up or down. The popover cards and the menu-bar picker follow that order. Providers added later keep their default slot.
+
+### Notes
+- Claude shows no 5-hour window because Anthropic's usage endpoint no longer returns one for this account (`five_hour` is null and `limits` carries only weekly entries). The weekly meters are what the API reports.
+
+## [1.6.7] - 2026-08-27 (not released separately; shipped in 1.6.8)
+
+### Fixed
+- **The Kimi card stopped updating, and said nothing.** Kimi's headroom was read with the web app's session token, copied out of the browser's DevTools console. That token is a 30-day credential. It expired, the reads started coming back 401, and the card kept showing the last reading it had, dimmed, but with no age on it and no prompt. It sat that way for thirteen days.
+
+  Headroom now reads the same numbers from the Kimi coding-plan API key instead, the one from kimi.com under Code → API keys. It does not expire, there is no browser step, and the response says which credential it accepted, so a reading can't come back from some other path and pass as healthy. Paste the key once in Settings; the old session token is no longer used and its keychain entry is retired.
+
+- **A provider needing a new credential could hide behind its own last reading.** When a card had ever read successfully, "you need to log in" lost to the stale fallback, so the one state that requires you to do something was the one state the card would not show. It now wins after two consecutive readings, so a Claude token refresh, which briefly looks the same, still can't flicker the card.
+
 ## [1.6.6] - 2026-07-27
 
 ### Fixed

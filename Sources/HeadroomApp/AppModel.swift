@@ -174,7 +174,16 @@ final class AppModel {
         var ids = Prefs.allProviderIDs
         let insertAt = (ids.firstIndex(of: "claude").map { $0 + 1 }) ?? ids.count
         ids.insert(contentsOf: discoveredClaudeIDs, at: insertAt)
-        return ids
+        return ProviderOrder.apply(saved: prefs.providerOrder, to: ids)
+    }
+
+    /// Move a provider one slot up (-1) or down (+1) in the display order, then reorder the
+    /// cards already on screen so the change shows without waiting for the next poll.
+    func moveProvider(_ id: String, by delta: Int) {
+        let order = ProviderOrder.move(id, by: delta, in: allProviderIDsForDisplay)
+        prefs.providerOrder = order
+        let rank = Dictionary(uniqueKeysWithValues: order.enumerated().map { ($1, $0) })
+        usages.sort { (rank[$0.provider] ?? .max) < (rank[$1.provider] ?? .max) }
     }
 
     /// More than one Claude account exists (the live one + at least one stash) — gates the
@@ -206,13 +215,16 @@ final class AppModel {
             zai,
             KimiCollector(),
             GrokCollector(),
+            OpenCodeCollector(),
         ]
         // One card per non-active stash, inserted right after the base Claude card.
         for (i, accID) in discoveredClaudeIDs.enumerated() {
             let label = ClaudeAccounts.label(forProviderID: accID)
             all.insert(claudeCollector(id: accID, label: label, isActive: false), at: 1 + i)
         }
+        let rank = Dictionary(uniqueKeysWithValues: allProviderIDsForDisplay.enumerated().map { ($1, $0) })
         return all.filter { prefs.isEnabled($0.id) }
+            .sorted { (rank[$0.id] ?? .max) < (rank[$1.id] ?? .max) }
     }
 
     // Account switching was removed in 1.6.2: it required writing Claude Code's own Keychain
@@ -346,6 +358,11 @@ final class AppModel {
     /// to this (marked `.stale`) instead of flashing the card to an empty error.
     private var lastGood: [String: ProviderUsage] = [:]
 
+    /// Consecutive `.needsLogin` readings, per provider. A terminal auth state must beat the
+    /// last-good fallback (see the refresh loop), but only after it repeats — Claude's creds
+    /// file reads as absent for a tick while the CLI rewrites it.
+    private var needsLoginStreak: [String: Int] = [:]
+
     /// Provider *service* health (is their API up), from the public status pages — distinct
     /// from usage. Only providers with a status page populate; others stay absent (no dot).
     var serviceHealth: [String: ServiceHealth] = [:]
@@ -474,17 +491,33 @@ final class AppModel {
             do {
                 let fresh = try await c.collect()
                 if fresh.status == .ok, !fresh.metrics.isEmpty {
+                    needsLoginStreak[c.id] = 0
                     lastGood[c.id] = fresh          // remember good readings
                     persistLastGood(fresh)          // survive relaunch → inactive meter shows last-known
                     current[c.id] = fresh
-                } else if fresh.status == .needsLogin, lastGood[c.id] == nil {
-                    current[c.id] = fresh           // genuinely unauthenticated → show the login/paste UI
+                } else if fresh.status == .needsLogin {
+                    // `.needsLogin` is TERMINAL, not a blip: a pasted token that expired (Kimi's
+                    // ~30-day JWT, MiniMax's 2049) never heals on its own. Falling back to
+                    // last-good here is what let Kimi sit 13 days stale showing a dimmed 13%
+                    // while the only fix — paste a fresh token — was never surfaced. An absent
+                    // reading is not a good reading. Require it twice, because Claude's creds
+                    // file reads as absent for a tick while the CLI rewrites it.
+                    let streak = (needsLoginStreak[c.id] ?? 0) + 1
+                    needsLoginStreak[c.id] = streak
+                    if streak >= 2 || lastGood[c.id] == nil {
+                        current[c.id] = fresh       // show the login/paste UI
+                    } else if var stale = lastGood[c.id] {
+                        stale.status = .stale       // first sighting — could still be a rotation blip
+                        current[c.id] = stale
+                    }
                 } else if var stale = lastGood[c.id] {
                     // A non-ok / empty reading (a 401 during Claude token rotation, or an inactive
                     // account's expired stash) must NOT blank the card — re-show last-good, dimmed.
+                    needsLoginStreak[c.id] = 0
                     stale.status = .stale
                     current[c.id] = stale
                 } else {
+                    needsLoginStreak[c.id] = 0
                     current[c.id] = fresh           // no prior good reading — show whatever we got
                 }
             } catch {
@@ -501,6 +534,7 @@ final class AppModel {
         // Drop providers the user turned off; render the rest in display order.
         current = current.filter { activeIDs.contains($0.key) }
         lastCollected = lastCollected.filter { activeIDs.contains($0.key) }
+        needsLoginStreak = needsLoginStreak.filter { activeIDs.contains($0.key) }
         usages = active.compactMap { current[$0.id] }
         recomputeMenuBar()                   // keep the menu-bar glyph synced to fresh usages
         refreshServiceHealth(now)            // check status pages (throttled, off the UI path)
@@ -543,7 +577,8 @@ final class AppModel {
         switch id {
         case "zai":     ZaiCollector.keyService
         case "minimax": MiniMaxCollector.keyService
-        case "kimi":    KimiCollector.keyService   // pasted session token
+        case "kimi":    KimiCollector.keyService   // pasted coding-plan API key
+        case "opencode": OpenCodeCollector.keyService
         default:        nil   // claude/codex use local creds
         }
     }

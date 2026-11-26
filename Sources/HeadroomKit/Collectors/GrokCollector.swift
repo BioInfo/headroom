@@ -3,18 +3,18 @@ import Foundation
 /// Grok (xAI SuperGrok / Grok Build) subscription headroom collector.
 ///
 /// Browser-free and LIVE, the same shape as `CodexCollector`: read the Grok CLI's own
-/// local OIDC token from `~/.grok/auth.json` and hit the endpoint the CLI itself polls
-/// for its weekly credit meter (the one it logs as `billing: fetched credits config`):
+/// local OIDC token from `~/.grok/auth.json` and hit the CLI's own billing endpoint:
 ///
-///   GET https://cli-chat-proxy.grok.com/v1/billing?format=credits
+///   GET https://cli-chat-proxy.grok.com/v1/billing
 ///   Authorization: Bearer <oidc access token>
 ///   x-grok-client-version: <cli version>
 ///
-/// `config.creditUsagePercent` is the weekly usage percent (0–100) against the
-/// SuperGrok / Grok Build allowance; `config.currentPeriod` is the billing window
-/// (`start`/`end`/`type`, e.g. `USAGE_PERIOD_TYPE_WEEKLY`). This is cleaner than the
-/// gRPC-web + browser-cookie path other trackers use — a plain JSON GET with the local
-/// bearer, no protobuf and no cookie import.
+/// The 1.0.0 CLI dropped `creditUsagePercent` from the `?format=credits` weekly view
+/// (it returns period info but no usage number). The default endpoint (no format param)
+/// returns `config.monthlyLimit` and `config.used` as `{"val": N}` credit wrappers, plus
+/// `billingPeriodStart`/`billingPeriodEnd` for the monthly window. We compute the usage
+/// percentage from `used / monthlyLimit` and use `billingPeriodEnd` as the reset time.
+/// `creditUsagePercent` is still decoded when present (backward compat with older responses).
 ///
 /// The token is read fresh each poll so the CLI owns refresh. On 401/403 (token) or 402
 /// ("Grok Build usage balance exhausted" — you're capped for the window, still authed)
@@ -25,17 +25,29 @@ public struct GrokCollector: Collector {
     public let id = "grok"
     public let displayName = "Grok"
 
-    private let usageURL = URL(string: "https://cli-chat-proxy.grok.com/v1/billing?format=credits")!
+    private let usageURL = URL(string: "https://cli-chat-proxy.grok.com/v1/billing")!
     private let authPath: URL
     private let clientVersion: String
     private let session: URLSession
 
-    public init(authPath: URL? = nil, clientVersion: String = "0.2.93",
+    /// Best-effort read of the installed CLI version from `~/.grok/version.json`, so the
+    /// `x-grok-client-version` header stays current without code changes. Falls back to
+    /// a hardcoded default (kept roughly current) if the file is missing or unreadable.
+    private static func detectClientVersion() -> String {
+        let v = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".grok/version.json")
+        guard let data = try? Data(contentsOf: v),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let version = obj["version"] as? String, !version.isEmpty else { return "1.0.0" }
+        return version
+    }
+
+    public init(authPath: URL? = nil, clientVersion: String? = nil,
                 session: URLSession = .shared) {
         self.authPath = authPath
             ?? FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent(".grok/auth.json")
-        self.clientVersion = clientVersion
+        self.clientVersion = clientVersion ?? Self.detectClientVersion()
         self.session = session
     }
 
@@ -139,22 +151,47 @@ public struct GrokCollector: Collector {
         try? out.write(to: path, options: .atomic)
     }
 
-    // MARK: - response shape (cli-chat-proxy.grok.com/v1/billing?format=credits)
+    // MARK: - response shape (cli-chat-proxy.grok.com/v1/billing)
 
     struct Response: Decodable { let config: Config? }
 
-    struct Config: Decodable {
-        let creditUsagePercent: Double?
-        let currentPeriod: Period?
-        let subscriptionTier: String?    // present in some responses; used as the plan label
+    /// `{"val": N}` wrapper used by onDemandCap, onDemandUsed, monthlyLimit, used, etc.
+    struct Val: Decodable { let val: Double? }
 
-        /// One weekly (or monthly) meter from `creditUsagePercent` over `currentPeriod`.
+    struct Config: Decodable {
+        let creditUsagePercent: Double?      // weekly view (pre-1.0.0, or when present)
+        let currentPeriod: Period?           // weekly view
+        let subscriptionTier: String?        // present in some responses; used as plan label
+        let monthlyLimit: Val?               // default (monthly) view: total monthly credits
+        let used: Val?                       // default (monthly) view: credits used this cycle
+        let billingPeriodStart: String?      // default (monthly) view: ISO start
+        let billingPeriodEnd: String?        // default (monthly) view: ISO end (reset time)
+
+        /// The usage meter. Prefers `creditUsagePercent` (the old weekly shape, still decoded
+        /// for backward compat); falls back to computing `used / monthlyLimit * 100` from the
+        /// monthly view. Returns `[]` only when neither is available.
         var metrics: [Metric] {
-            guard let pct = creditUsagePercent else { return [] }
-            return [Metric(label: currentPeriod?.label ?? "Weekly",
+            if let pct = creditUsagePercent {
+                return [Metric(label: currentPeriod?.label ?? "Weekly",
+                               percentUsed: pct, unit: .percent,
+                               resetAt: currentPeriod?.resetAt,
+                               windowDuration: currentPeriod?.duration)]
+            }
+            guard let limit = monthlyLimit?.val, limit > 0,
+                  let usedVal = used?.val else { return [] }
+            let pct = usedVal / limit * 100
+            return [Metric(label: "Monthly",
+                           used: usedVal, limit: limit,
                            percentUsed: pct, unit: .percent,
-                           resetAt: currentPeriod?.resetAt,
-                           windowDuration: currentPeriod?.duration)]
+                           resetAt: GrokCollector.parseISO(billingPeriodEnd),
+                           windowDuration: monthlyWindowDuration)]
+        }
+
+        /// Monthly window length from billingPeriodStart → billingPeriodEnd (≈2592000 for 30d).
+        var monthlyWindowDuration: TimeInterval? {
+            guard let s = GrokCollector.parseISO(billingPeriodStart),
+                  let e = GrokCollector.parseISO(billingPeriodEnd), e > s else { return nil }
+            return e.timeIntervalSince(s)
         }
     }
 

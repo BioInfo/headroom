@@ -128,7 +128,7 @@ public final class ZaiCollector: NSObject, Collector {
         let level: String?
         let limits: [Limit]?
     }
-    private struct Limit: Decodable {
+    struct Limit: Decodable {   // internal (not private) so tests can reach the window helpers
         let type: String
         let usage: Double?
         let remaining: Double?
@@ -156,21 +156,23 @@ public final class ZaiCollector: NSObject, Collector {
             }
         }
 
-        /// z.ai encodes a window as (number × unit). Known units: 3 = hour, 5 = month
-        /// (2 = minute, 4 = day by extension). Returns seconds, or nil if the unit is unknown.
+        /// z.ai encodes a window as (number × unit). Known units: 3 = hour, 5 = month,
+        /// 6 = week (live 2026-10-26: weekly TOKENS_LIMIT); 2 = minute, 4 = day by extension. Returns seconds, or nil if the unit is unknown.
         static func windowSeconds(_ number: Int?, _ unit: Int?) -> TimeInterval? {
             guard let number, let unit,
-                  let per = [2: 60.0, 3: 3600.0, 4: 86400.0, 5: 2_629_800.0][unit] else { return nil }
+                  let per = [2: 60.0, 3: 3600.0, 4: 86400.0, 5: 2_629_800.0, 6: 604_800.0][unit] else { return nil }
             return per * Double(number)
         }
         static func windowLabel(_ number: Int?, _ unit: Int?) -> String {
             guard let number, let unit else { return "Usage" }
+            // An unrecognised unit stays visible so the next new z.ai code gets noticed.
             switch unit {
             case 2:  return "\(number)m window"
             case 3:  return "\(number)h window"     // "5h window"
             case 4:  return "\(number)d window"
             case 5:  return number == 1 ? "Monthly" : "\(number)mo window"
-            default: return "Usage"
+            case 6:  return number == 1 ? "Weekly" : "\(number)w window"
+            default: return "Usage (unit \(unit))"
             }
         }
     }
